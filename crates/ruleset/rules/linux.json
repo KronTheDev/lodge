@@ -1,0 +1,72 @@
+[
+  {
+    "id": "linux-cli-bin",
+    "type": "cli-tool",
+    "match": "bin/*",
+    "destination": {
+      "user": "~/.local/bin/",
+      "system": "/usr/local/bin/"
+    },
+    "priority": 10
+  },
+  {
+    "id": "linux-lib",
+    "type": "library",
+    "match": "lib/*",
+    "destination": {
+      "user": "~/.local/lib/",
+      "system": "/usr/local/lib/"
+    },
+    "priority": 10
+  },
+  {
+    "id": "linux-service",
+    "type": "service",
+    "match": "*.service",
+    "destination": {
+      "user": "~/.config/systemd/user/",
+      "system": "/etc/systemd/system/"
+    },
+    "priority": 10
+  },
+  {
+    "id": "linux-share",
+    "type": "cli-tool",
+    "match": "share/*",
+    "destination": {
+      "user": "~/.local/share/",
+      "system": "/usr/local/share/"
+    },
+    "priority": 50
+  },
+  {
+    "id": "linux-font",
+    "type": "font",
+    "match": "*.{ttf,otf}",
+    "destination": {
+      "user": "~/.local/share/fonts/",
+      "system": "/usr/local/share/fonts/"
+    },
+    "priority": 10
+  },
+  {
+    "id": "linux-config-pack",
+    "type": "config-pack",
+    "match": "*",
+    "destination": {
+      "user": "~/.config/{id}/",
+      "system": "/etc/{id}/"
+    },
+    "priority": 100
+  },
+  {
+    "id": "linux-app-desktop",
+    "type": "app",
+    "match": "*.desktop",
+    "destination": {
+      "user": "~/.local/share/applications/",
+      "system": "/usr/local/share/applications/"
+    },
+    "priority": 10
+  }
+]

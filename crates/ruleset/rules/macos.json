@@ -1,0 +1,62 @@
+[
+  {
+    "id": "mac-cli-bin",
+    "type": "cli-tool",
+    "match": "bin/*",
+    "destination": {
+      "user": "~/.local/bin/",
+      "system": "/usr/local/bin/"
+    },
+    "priority": 10
+  },
+  {
+    "id": "mac-cli-dylib",
+    "type": "cli-tool",
+    "match": "*.dylib",
+    "destination": {
+      "user": "~/.local/lib/",
+      "system": "/usr/local/lib/"
+    },
+    "priority": 20
+  },
+  {
+    "id": "mac-app",
+    "type": "app",
+    "match": "*.app",
+    "destination": {
+      "user": "~/Applications/",
+      "system": "/Applications/"
+    },
+    "priority": 10
+  },
+  {
+    "id": "mac-launch-agent",
+    "type": "service",
+    "match": "*.plist",
+    "destination": {
+      "user": "~/Library/LaunchAgents/",
+      "system": "/Library/LaunchDaemons/"
+    },
+    "priority": 10
+  },
+  {
+    "id": "mac-font",
+    "type": "font",
+    "match": "*.{ttf,otf}",
+    "destination": {
+      "user": "~/Library/Fonts/",
+      "system": "/Library/Fonts/"
+    },
+    "priority": 10
+  },
+  {
+    "id": "mac-config-pack",
+    "type": "config-pack",
+    "match": "*",
+    "destination": {
+      "user": "~/.config/{id}/",
+      "system": "/etc/{id}/"
+    },
+    "priority": 100
+  }
+]

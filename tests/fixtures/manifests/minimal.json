@@ -1,0 +1,5 @@
+{
+  "id": "mytool",
+  "version": "1.0.0",
+  "type": "cli-tool"
+}

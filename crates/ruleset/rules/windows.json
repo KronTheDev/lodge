@@ -1,0 +1,91 @@
+[
+  {
+    "id": "win-cli-exe",
+    "type": "cli-tool",
+    "match": "*.exe",
+    "destination": {
+      "user": "%LOCALAPPDATA%\\Programs\\{id}\\",
+      "system": "%ProgramFiles%\\{id}\\"
+    },
+    "register": {
+      "path": false,
+      "env_var": false,
+      "service": false,
+      "start_menu": false
+    },
+    "priority": 10
+  },
+  {
+    "id": "win-cli-dll",
+    "type": "cli-tool",
+    "match": "*.dll",
+    "destination": {
+      "user": "%LOCALAPPDATA%\\Programs\\{id}\\",
+      "system": "%ProgramFiles%\\{id}\\"
+    },
+    "priority": 20
+  },
+  {
+    "id": "win-cli-config",
+    "type": "cli-tool",
+    "match": "*.{json,yaml,toml}",
+    "destination": {
+      "user": "%APPDATA%\\{id}\\",
+      "system": "%ProgramData%\\{id}\\"
+    },
+    "priority": 30
+  },
+  {
+    "id": "win-ps-module",
+    "type": "ps-module",
+    "match": "*.{psm1,psd1,ps1}",
+    "destination": {
+      "user": "%USERPROFILE%\\Documents\\PowerShell\\Modules\\{id}\\",
+      "system": "%ProgramFiles%\\PowerShell\\Modules\\{id}\\"
+    },
+    "priority": 10
+  },
+  {
+    "id": "win-app-exe",
+    "type": "app",
+    "match": "*.exe",
+    "destination": {
+      "user": "%LOCALAPPDATA%\\Programs\\{id}\\",
+      "system": "%ProgramFiles%\\{id}\\"
+    },
+    "register": {
+      "start_menu": true
+    },
+    "priority": 10
+  },
+  {
+    "id": "win-font",
+    "type": "font",
+    "match": "*.{ttf,otf,woff,woff2}",
+    "destination": {
+      "user": "%LOCALAPPDATA%\\Microsoft\\Windows\\Fonts\\",
+      "system": "%SystemRoot%\\Fonts\\"
+    },
+    "priority": 10
+  },
+  {
+    "id": "win-config-pack",
+    "type": "config-pack",
+    "match": "*",
+    "destination": {
+      "user": "%APPDATA%\\{id}\\",
+      "system": "%ProgramData%\\{id}\\"
+    },
+    "priority": 100
+  },
+  {
+    "id": "win-dev-tool-exe",
+    "type": "dev-tool",
+    "match": "*.exe",
+    "destination": {
+      "user": "%LOCALAPPDATA%\\Dev\\{id}\\",
+      "system": "%ProgramFiles%\\Dev\\{id}\\"
+    },
+    "priority": 10
+  }
+]
