@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::path::Path;
 
 /// Registers a command shim for an installed CLI tool.

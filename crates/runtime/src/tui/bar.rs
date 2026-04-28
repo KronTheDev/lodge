@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 /// Always-open command bar with single-line input and rich response area.
 ///
 /// On first launch (no arguments) renders the splash screen above the bar.

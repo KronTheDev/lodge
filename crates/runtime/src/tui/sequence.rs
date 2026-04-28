@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 /// Live-updating installation sequence display.
 ///
 /// Step states: ✔ done  ✖ failed  ◐ in-progress  · pending  ! warning

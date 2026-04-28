@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check:*)",
+      "Bash(git remote:*)",
+      "Bash(node -e \"const f=require\\('fs'\\);const c=JSON.parse\\(f.readFileSync\\('C:/Users/andri/GitProj/psypunker/.mcp.json','utf8'\\)\\);console.log\\(c.mcpServers.github.env.GITHUB_PERSONAL_ACCESS_TOKEN\\)\")",
+      "Bash(curl -s -H 'Authorization: Bearer __TRACKED_VAR__' https://api.github.com/repos/KronTheDev/lodge)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d.get\\('id','ERR'\\), d.get\\('full_name','ERR'\\), d.get\\('default_branch','ERR'\\)\\)\")",
+      "Bash(cargo test:*)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d.get\\('number'\\), d.get\\('title'\\)\\)\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d.get\\('number'\\), d.get\\('title'\\), d.get\\('message',''\\)\\)\")",
+      "Bash(cargo clippy:*)"
+    ]
+  }
+}

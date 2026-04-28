@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use lodge_shared::{manifest::Manifest, placement::PlacementPlan};
 
 /// Renders the pre-install flashcard screen.

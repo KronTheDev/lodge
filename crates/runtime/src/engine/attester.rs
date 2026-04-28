@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use lodge_shared::{manifest::Manifest, placement::PlacementPlan, receipt::Receipt};
 
 /// Writes a signed execution receipt for a completed installation.

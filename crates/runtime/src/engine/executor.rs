@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use lodge_shared::placement::PlacementPlan;
 
 /// Executes a resolved [`PlacementPlan`], streaming step results to the TUI.
