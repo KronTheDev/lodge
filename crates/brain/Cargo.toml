@@ -3,8 +3,14 @@ name = "lodge-brain"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Enable full llama.cpp inference. Requires cmake and a C++ compiler.
+# Without this feature the brain works in deterministic mode.
+# Usage: cargo build --features lodge-brain/model
+model = ["dep:llama-cpp-2"]
+
 [dependencies]
-# llama.cpp bindings — evaluate llama-cpp-2 vs llama-cpp-rs vs direct bindgen at implementation start
+llama-cpp-2 = { version = "0.1", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

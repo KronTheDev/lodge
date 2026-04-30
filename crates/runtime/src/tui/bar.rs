@@ -12,13 +12,14 @@ use ratatui::{
     Terminal,
 };
 
+use lodge_brain::Brain;
+
 use super::{palette, splash};
 
 /// Runs the interactive command bar.
 ///
 /// Shows the splash screen, then opens a persistent `> _` prompt.
-/// Input is read line by line. The brain integration (M5) will route commands;
-/// for now, a stub response is returned for every input.
+/// Input is routed through the brain (deterministic resolver + model if loaded).
 pub fn run() -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -43,9 +44,21 @@ pub fn run() -> anyhow::Result<()> {
         }
     }
 
-    // Command bar loop
+    // Initialise brain (tries to load model, degrades gracefully)
+    let mut brain = Brain::new();
+    let model_note = if brain.has_model() {
+        None
+    } else {
+        Some("running in deterministic mode — place smollm2-360m-q4_k_m.gguf alongside the binary to enable AI.")
+    };
+
     let mut input = String::new();
-    let mut history: Vec<(String, String)> = Vec::new(); // (input, response)
+    let mut history: Vec<(String, String)> = Vec::new();
+
+    // Show model note as first history entry if applicable
+    if let Some(note) = model_note {
+        history.push((String::new(), note.to_string()));
+    }
 
     loop {
         terminal.draw(|f| render_bar(&input, &history, f))?;
@@ -57,7 +70,7 @@ pub fn run() -> anyhow::Result<()> {
                 (KeyCode::Enter, _) => {
                     let trimmed = input.trim().to_string();
                     if !trimmed.is_empty() {
-                        let response = handle_command(&trimmed);
+                        let response = brain.handle(&trimmed);
                         history.push((trimmed, response));
                         // Keep only last 6 exchanges in display
                         if history.len() > 6 {
@@ -90,14 +103,18 @@ fn render_bar(input: &str, history: &[(String, String)], frame: &mut ratatui::Fr
     let area = frame.area();
     let div = "─".repeat(area.width as usize);
 
-    // Count history lines needed
+    // Build history lines
     let history_lines: Vec<Line> = history
         .iter()
         .flat_map(|(cmd, resp)| {
-            let mut lines = vec![Line::from(vec![
-                Span::styled("  > ", Style::default().fg(palette::ACCENT)),
-                Span::styled(cmd.clone(), Style::default().fg(palette::TEXT)),
-            ])];
+            let mut lines: Vec<Line> = Vec::new();
+            // Only show the prompt line if there was actual input
+            if !cmd.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("  > ", Style::default().fg(palette::ACCENT)),
+                    Span::styled(cmd.clone(), Style::default().fg(palette::TEXT)),
+                ]));
+            }
             if !resp.is_empty() {
                 lines.push(Line::from(Span::styled(
                     format!("  {resp}"),
@@ -114,10 +131,10 @@ fn render_bar(input: &str, history: &[(String, String)], frame: &mut ratatui::Fr
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(0),                // spacer / history
-            Constraint::Length(1),             // divider
-            Constraint::Length(1),             // input line
-            Constraint::Length(1),             // divider
+            Constraint::Min(0),    // spacer / history
+            Constraint::Length(1), // divider
+            Constraint::Length(1), // input line
+            Constraint::Length(1), // divider
         ])
         .split(area);
 
@@ -144,17 +161,4 @@ fn render_bar(input: &str, history: &[(String, String)], frame: &mut ratatui::Fr
         Span::styled("_", Style::default().fg(palette::HIGHLIGHT)),
     ]);
     frame.render_widget(Paragraph::new(prompt), chunks[2]);
-}
-
-/// Stub command handler — replaced by brain integration in M5.
-fn handle_command(input: &str) -> String {
-    match input.trim().to_lowercase().as_str() {
-        "help" => "commands: install, list, info, verify, history, help".into(),
-        "list" => "no packages installed yet.".into(),
-        "history" => "no installation history.".into(),
-        cmd if cmd.starts_with("install ") => {
-            "use `lodge install <path>` from the terminal to install packages.".to_string()
-        }
-        _ => "brain not yet connected — M5 will route this.".into(),
-    }
 }
