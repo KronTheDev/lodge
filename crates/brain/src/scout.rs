@@ -113,12 +113,18 @@ pub static PROBES: &[Probe] = &[
 
 /// Dispatches a probe by name with the given args.
 pub fn dispatch(name: &str, args: &ProbeArgs) -> Option<ProbeResult> {
-    PROBES.iter().find(|p| p.name == name).map(|p| (p.run)(args))
+    PROBES
+        .iter()
+        .find(|p| p.name == name)
+        .map(|p| (p.run)(args))
 }
 
 /// Builds a probe args map from key-value pairs.
 pub fn args(pairs: &[(&str, &str)]) -> ProbeArgs {
-    pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
 }
 
 mod probes {
@@ -140,24 +146,48 @@ mod probes {
     /// Run a PowerShell one-liner and return output, or None on failure.
     #[cfg(windows)]
     fn ps(script: &str) -> Option<String> {
-        run_cmd("powershell", &["-NoProfile", "-NonInteractive", "-Command", script])
+        run_cmd(
+            "powershell",
+            &["-NoProfile", "-NonInteractive", "-Command", script],
+        )
     }
 
     #[cfg(not(windows))]
     fn ps(script: &str) -> Option<String> {
-        run_cmd("pwsh", &["-NoProfile", "-NonInteractive", "-Command", script])
+        run_cmd(
+            "pwsh",
+            &["-NoProfile", "-NonInteractive", "-Command", script],
+        )
     }
 
     fn ok(probe: &'static str, value: String, raw: Option<String>) -> ProbeResult {
-        ProbeResult { probe, found: true, value: Some(value), raw, error: None }
+        ProbeResult {
+            probe,
+            found: true,
+            value: Some(value),
+            raw,
+            error: None,
+        }
     }
 
     fn not_found(probe: &'static str) -> ProbeResult {
-        ProbeResult { probe, found: false, value: None, raw: None, error: None }
+        ProbeResult {
+            probe,
+            found: false,
+            value: None,
+            raw: None,
+            error: None,
+        }
     }
 
     fn err(probe: &'static str, msg: String) -> ProbeResult {
-        ProbeResult { probe, found: false, value: None, raw: None, error: Some(msg) }
+        ProbeResult {
+            probe,
+            found: false,
+            value: None,
+            raw: None,
+            error: Some(msg),
+        }
     }
 
     // ── Probe implementations ─────────────────────────────────────────────────
@@ -172,7 +202,8 @@ mod probes {
     pub fn dotnet_runtimes(_args: &ProbeArgs) -> ProbeResult {
         match run_cmd("dotnet", &["--list-runtimes"]) {
             Some(raw) => {
-                let versions: Vec<&str> = raw.lines()
+                let versions: Vec<&str> = raw
+                    .lines()
                     .filter_map(|l| l.split_whitespace().nth(1))
                     .collect();
                 let value = if versions.is_empty() {
@@ -195,8 +226,7 @@ mod probes {
 
     pub fn python_version(_args: &ProbeArgs) -> ProbeResult {
         // Try python, then python3
-        let raw = run_cmd("python", &["--version"])
-            .or_else(|| run_cmd("python3", &["--version"]));
+        let raw = run_cmd("python", &["--version"]).or_else(|| run_cmd("python3", &["--version"]));
         match raw {
             Some(v) => ok("python_version", v.clone(), Some(v)),
             None => not_found("python_version"),
@@ -217,7 +247,11 @@ mod probes {
         ProbeResult {
             probe: "port_in_use",
             found: in_use,
-            value: Some(if in_use { "in use".into() } else { "free".into() }),
+            value: Some(if in_use {
+                "in use".into()
+            } else {
+                "free".into()
+            }),
             raw: None,
             error: None,
         }
@@ -237,7 +271,11 @@ mod probes {
                     ProbeResult {
                         probe: "service_status",
                         found: true,
-                        value: Some(if running { "running".into() } else { "stopped".into() }),
+                        value: Some(if running {
+                            "running".into()
+                        } else {
+                            "stopped".into()
+                        }),
                         raw: Some(raw),
                         error: None,
                     }
@@ -304,7 +342,9 @@ mod probes {
         {
             match run_cmd("df", &["-k", "--output=avail", path]) {
                 Some(raw) => {
-                    let kb: u64 = raw.lines().nth(1)
+                    let kb: u64 = raw
+                        .lines()
+                        .nth(1)
                         .and_then(|l| l.trim().parse().ok())
                         .unwrap_or(0);
                     let human = format_bytes(kb * 1024);
@@ -340,7 +380,8 @@ mod probes {
         {
             match run_cmd("sw_vers", &[]) {
                 Some(raw) => {
-                    let v = raw.lines()
+                    let v = raw
+                        .lines()
                         .find(|l| l.starts_with("ProductVersion"))
                         .and_then(|l| l.split(':').nth(1))
                         .map(|s| s.trim().to_string())
@@ -372,13 +413,18 @@ mod probes {
         #[cfg(windows)]
         {
             let raw = run_cmd("tasklist", &["/FI", &format!("IMAGENAME eq {name}"), "/NH"]);
-            let running = raw.as_deref()
+            let running = raw
+                .as_deref()
                 .map(|r| r.to_lowercase().contains(&name.to_lowercase()))
                 .unwrap_or(false);
             ProbeResult {
                 probe: "process_running",
                 found: running,
-                value: Some(if running { "running".into() } else { "not found".into() }),
+                value: Some(if running {
+                    "running".into()
+                } else {
+                    "not found".into()
+                }),
                 raw,
                 error: None,
             }
@@ -390,7 +436,11 @@ mod probes {
             ProbeResult {
                 probe: "process_running",
                 found: running,
-                value: Some(if running { "running".into() } else { "not found".into() }),
+                value: Some(if running {
+                    "running".into()
+                } else {
+                    "not found".into()
+                }),
                 raw: None,
                 error: None,
             }
@@ -404,7 +454,11 @@ mod probes {
             probe: "path_exists",
             found: meta.is_ok(),
             value: meta.ok().map(|m| {
-                if m.is_dir() { "directory".into() } else { "file".into() }
+                if m.is_dir() {
+                    "directory".into()
+                } else {
+                    "file".into()
+                }
             }),
             raw: None,
             error: None,
@@ -419,7 +473,11 @@ mod probes {
         ProbeResult {
             probe: "path_writable",
             found: writable,
-            value: Some(if writable { "writable".into() } else { "not writable".into() }),
+            value: Some(if writable {
+                "writable".into()
+            } else {
+                "not writable".into()
+            }),
             raw: None,
             error: None,
         }
@@ -472,7 +530,11 @@ mod tests {
     #[test]
     fn path_exists_for_temp() {
         let tmp = std::env::temp_dir();
-        let result = dispatch("path_exists", &args(&[("path", tmp.to_string_lossy().as_ref())])).unwrap();
+        let result = dispatch(
+            "path_exists",
+            &args(&[("path", tmp.to_string_lossy().as_ref())]),
+        )
+        .unwrap();
         assert!(result.found);
         assert_eq!(result.value.as_deref(), Some("directory"));
     }
@@ -493,14 +555,22 @@ mod tests {
     fn all_probes_have_unique_names() {
         let mut names = std::collections::HashSet::new();
         for probe in PROBES {
-            assert!(names.insert(probe.name), "duplicate probe name: {}", probe.name);
+            assert!(
+                names.insert(probe.name),
+                "duplicate probe name: {}",
+                probe.name
+            );
         }
     }
 
     #[test]
     fn all_probes_have_descriptions() {
         for probe in PROBES {
-            assert!(!probe.description.is_empty(), "probe {} has empty description", probe.name);
+            assert!(
+                !probe.description.is_empty(),
+                "probe {} has empty description",
+                probe.name
+            );
         }
     }
 }

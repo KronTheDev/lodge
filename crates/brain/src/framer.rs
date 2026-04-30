@@ -25,7 +25,10 @@ pub fn frame_probe_result(probe: &str, result: &ProbeResult) -> String {
     match probe {
         "node_version" => {
             if result.found {
-                format!("node {}.", result.value.as_deref().unwrap_or("(unknown version)"))
+                format!(
+                    "node {}.",
+                    result.value.as_deref().unwrap_or("(unknown version)")
+                )
             } else {
                 "node is not installed.".into()
             }
@@ -33,7 +36,10 @@ pub fn frame_probe_result(probe: &str, result: &ProbeResult) -> String {
 
         "ps_version" => {
             if result.found {
-                format!("PowerShell {}.", result.value.as_deref().unwrap_or("(unknown version)"))
+                format!(
+                    "PowerShell {}.",
+                    result.value.as_deref().unwrap_or("(unknown version)")
+                )
             } else {
                 "PowerShell isn't installed, or isn't on PATH.".into()
             }
@@ -41,7 +47,10 @@ pub fn frame_probe_result(probe: &str, result: &ProbeResult) -> String {
 
         "dotnet_runtimes" => {
             if result.found {
-                format!(".NET runtimes: {}.", result.value.as_deref().unwrap_or("none"))
+                format!(
+                    ".NET runtimes: {}.",
+                    result.value.as_deref().unwrap_or("none")
+                )
             } else {
                 ".NET isn't installed.".into()
             }
@@ -49,7 +58,13 @@ pub fn frame_probe_result(probe: &str, result: &ProbeResult) -> String {
 
         "python_version" => {
             if result.found {
-                format!("{}.", result.value.as_deref().unwrap_or("Python (unknown version)"))
+                format!(
+                    "{}.",
+                    result
+                        .value
+                        .as_deref()
+                        .unwrap_or("Python (unknown version)")
+                )
             } else {
                 "Python isn't installed, or isn't on PATH.".into()
             }
@@ -106,39 +121,42 @@ pub fn frame_probe_result(probe: &str, result: &ProbeResult) -> String {
 
         "os_build" => {
             if result.found {
-                result.value.clone().unwrap_or_else(|| "OS version unknown.".into())
+                result
+                    .value
+                    .clone()
+                    .unwrap_or_else(|| "OS version unknown.".into())
             } else {
                 "couldn't read OS version.".into()
             }
         }
 
-        "process_running" => {
-            match result.value.as_deref() {
-                Some("running") => "that process is running.".into(),
-                Some("not found") => "that process isn't running.".into(),
-                _ => "couldn't check process list.".into(),
-            }
-        }
+        "process_running" => match result.value.as_deref() {
+            Some("running") => "that process is running.".into(),
+            Some("not found") => "that process isn't running.".into(),
+            _ => "couldn't check process list.".into(),
+        },
 
         "path_exists" => {
             if result.found {
-                format!("exists ({}).", result.value.as_deref().unwrap_or("unknown type"))
+                format!(
+                    "exists ({}).",
+                    result.value.as_deref().unwrap_or("unknown type")
+                )
             } else {
                 "nothing there.".into()
             }
         }
 
-        "path_writable" => {
-            match result.value.as_deref() {
-                Some("writable") => "writable.".into(),
-                Some("not writable") => "not writable.".into(),
-                _ => "couldn't check permissions.".into(),
-            }
-        }
+        "path_writable" => match result.value.as_deref() {
+            Some("writable") => "writable.".into(),
+            Some("not writable") => "not writable.".into(),
+            _ => "couldn't check permissions.".into(),
+        },
 
-        "arch" => {
-            result.value.clone().unwrap_or_else(|| "unknown architecture.".into())
-        }
+        "arch" => result
+            .value
+            .clone()
+            .unwrap_or_else(|| "unknown architecture.".into()),
 
         _ => {
             if let Some(err) = &result.error {
@@ -177,7 +195,13 @@ mod tests {
     }
 
     fn not_found(probe: &'static str) -> ProbeResult {
-        ProbeResult { probe, found: false, value: None, raw: None, error: None }
+        ProbeResult {
+            probe,
+            found: false,
+            value: None,
+            raw: None,
+            error: None,
+        }
     }
 
     #[test]

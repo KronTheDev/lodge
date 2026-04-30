@@ -91,7 +91,10 @@ pub fn resolve(
                     (template.to_string(), reg)
                 }
                 // Step 3c — catch-all.
-                None => (catch_all(os, &scope_res.scope).to_string(), RegistrationEffects::default()),
+                None => (
+                    catch_all(os, &scope_res.scope).to_string(),
+                    RegistrationEffects::default(),
+                ),
             };
 
         merge_registrations(&mut registrations, rule_registrations);
@@ -169,8 +172,16 @@ fn rule_to_registrations(
 ) -> RegistrationEffects {
     RegistrationEffects {
         add_to_path: rule.register.path,
-        env_var: if rule.register.env_var { manifest.naming.env_var.clone() } else { None },
-        service_name: if rule.register.service { manifest.naming.service.clone() } else { None },
+        env_var: if rule.register.env_var {
+            manifest.naming.env_var.clone()
+        } else {
+            None
+        },
+        service_name: if rule.register.service {
+            manifest.naming.service.clone()
+        } else {
+            None
+        },
         start_menu_entry: rule.register.start_menu,
     }
 }
@@ -221,7 +232,10 @@ mod tests {
             package_type: PackageType::CliTool,
             description: None,
             author: None,
-            prefers: Prefers { scope: Some(Scope::User), ..Default::default() },
+            prefers: Prefers {
+                scope: Some(Scope::User),
+                ..Default::default()
+            },
             requires: Default::default(),
             naming: Default::default(),
             overrides: vec![],
@@ -280,7 +294,10 @@ mod tests {
         let plan = resolve(pkg.path(), &manifest, "linux", false).unwrap();
         assert_eq!(plan.entries.len(), 1);
         assert!(
-            plan.entries[0].destination.to_string_lossy().contains(".custom"),
+            plan.entries[0]
+                .destination
+                .to_string_lossy()
+                .contains(".custom"),
             "override destination should be used"
         );
     }
@@ -336,7 +353,9 @@ mod tests {
     #[test]
     fn all_package_types_have_string_repr() {
         use PackageType::*;
-        for pt in [CliTool, PsModule, Service, Library, App, ConfigPack, DevTool, Font] {
+        for pt in [
+            CliTool, PsModule, Service, Library, App, ConfigPack, DevTool, Font,
+        ] {
             assert!(!package_type_str(&pt).is_empty());
         }
     }

@@ -21,11 +21,17 @@ pub fn infer_scope(manifest: &Manifest, has_elevation: bool) -> anyhow::Result<S
     let preferred = manifest.prefers.scope.as_ref().unwrap_or(&Scope::User);
 
     match preferred {
-        Scope::User => Ok(ScopeResolution { scope: Scope::User, fell_back: false }),
+        Scope::User => Ok(ScopeResolution {
+            scope: Scope::User,
+            fell_back: false,
+        }),
 
         Scope::System => {
             if has_elevation {
-                Ok(ScopeResolution { scope: Scope::System, fell_back: false })
+                Ok(ScopeResolution {
+                    scope: Scope::System,
+                    fell_back: false,
+                })
             } else if manifest.requires.elevation {
                 anyhow::bail!(
                     "{} requires system scope with elevation, but elevation is unavailable. \
@@ -33,7 +39,10 @@ pub fn infer_scope(manifest: &Manifest, has_elevation: bool) -> anyhow::Result<S
                     manifest.id
                 )
             } else {
-                Ok(ScopeResolution { scope: Scope::User, fell_back: true })
+                Ok(ScopeResolution {
+                    scope: Scope::User,
+                    fell_back: true,
+                })
             }
         }
     }

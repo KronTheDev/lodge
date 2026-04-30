@@ -1,0 +1,17 @@
+{
+  "id": "lodge",
+  "version": "0.1.0",
+  "type": "cli-tool",
+  "description": "A language-agnostic installer runtime with a conversational command interface.",
+  "author": "KronTheDev",
+  "prefers": {
+    "scope": "user",
+    "elevation": false,
+    "isolated": true
+  },
+  "as": {
+    "command": "lodge",
+    "env_var": "LODGE_HOME",
+    "display_name": "Lodge"
+  }
+}

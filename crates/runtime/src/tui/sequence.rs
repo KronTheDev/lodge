@@ -41,7 +41,11 @@ pub fn steps_for_plan(plan: &PlacementPlan) -> Vec<Step> {
                 .unwrap_or_default(),
         );
         let detail = entry.destination.to_string_lossy().into_owned();
-        steps.push(Step { label, detail, state: StepState::Pending });
+        steps.push(Step {
+            label,
+            detail,
+            state: StepState::Pending,
+        });
     }
 
     if plan.registrations.add_to_path {
@@ -219,7 +223,10 @@ fn render(id: &str, version: &str, steps: &[Step], done: usize, total: usize, fr
             let detail_short = truncate(&s.detail, area.width.saturating_sub(20) as usize);
             Line::from(vec![
                 Span::styled(format!("  {symbol}  "), sym_style),
-                Span::styled(format!("{:<14}", s.label), Style::default().fg(palette::TEXT_DIM)),
+                Span::styled(
+                    format!("{:<14}", s.label),
+                    Style::default().fg(palette::TEXT_DIM),
+                ),
                 Span::styled("→ ", Style::default().fg(palette::BORDER)),
                 Span::styled(detail_short, Style::default().fg(palette::TEXT)),
             ])

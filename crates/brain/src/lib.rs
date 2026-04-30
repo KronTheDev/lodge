@@ -29,8 +29,7 @@ impl Brain {
     /// Searches for the model file at the standard paths (see [`inference::model_path`]).
     /// Falls back gracefully to deterministic mode if no model is found.
     pub fn new() -> Self {
-        let engine = inference::model_path()
-            .and_then(|p| InferenceEngine::load(&p).ok());
+        let engine = inference::model_path().and_then(|p| InferenceEngine::load(&p).ok());
         let system_prompt = intent::build_system_prompt();
         Self {
             engine,
@@ -80,56 +79,85 @@ impl Brain {
             History => "no installation history.".into(),
 
             Install => {
-                let target = intent.args.get("target")
+                let target = intent
+                    .args
+                    .get("target")
                     .and_then(|v| v.as_str())
                     .unwrap_or(raw_input.trim_start_matches("install").trim());
                 format!("use `lodge install {target}` from the terminal to install packages.")
             }
 
             Uninstall => {
-                let id = intent.args.get("id")
+                let id = intent
+                    .args
+                    .get("id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
                 format!("use `lodge uninstall {id}` from the terminal.")
             }
 
             Update => {
-                let id = intent.args.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                let id = intent
+                    .args
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 format!("update for {id}: not yet implemented.")
             }
 
             UpdateAll => "update all: not yet implemented.".into(),
 
             Search => {
-                let q = intent.args.get("query").and_then(|v| v.as_str()).unwrap_or("?");
+                let q = intent
+                    .args
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 format!("search for '{q}': not yet implemented.")
             }
 
             Info => {
-                let id = intent.args.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                let id = intent
+                    .args
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 format!("info for {id}: not yet implemented.")
             }
 
             Verify => {
-                let id = intent.args.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                let id = intent
+                    .args
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 format!("verify for {id}: not yet implemented.")
             }
 
             Rollback => {
-                let id = intent.args.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                let id = intent
+                    .args
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 format!("rollback for {id}: not yet implemented.")
             }
 
             UpdateRulesets => "update rulesets: not yet implemented.".into(),
 
             Use => {
-                let spec = intent.args.get("spec").and_then(|v| v.as_str()).unwrap_or("?");
+                let spec = intent
+                    .args
+                    .get("spec")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 format!("use {spec}: not yet implemented.")
             }
 
             Explore => self.run_probe(intent),
 
-            Clarify => intent.prompt
+            Clarify => intent
+                .prompt
                 .clone()
                 .unwrap_or_else(|| "what would you like to do?".into()),
         }
@@ -137,11 +165,15 @@ impl Brain {
 
     /// Execute a probe and frame the result.
     fn run_probe(&self, intent: &Intent) -> String {
-        let probe = intent.args.get("probe")
+        let probe = intent
+            .args
+            .get("probe")
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let probe_args: ProbeArgs = intent.args.get("probe_args")
+        let probe_args: ProbeArgs = intent
+            .args
+            .get("probe_args")
             .and_then(|v| v.as_object())
             .map(|o| {
                 o.iter()
@@ -179,11 +211,7 @@ pub fn compatibility_check(
         let current = std::env::consts::OS;
         let matches = os.to_lowercase() == current.to_lowercase()
             || (os.to_lowercase() == "macos" && current == "macos");
-        rows.push((
-            format!("OS: {os}"),
-            matches,
-            format!("running {current}"),
-        ));
+        rows.push((format!("OS: {os}"), matches, format!("running {current}")));
     }
 
     // OS version check
@@ -194,7 +222,10 @@ pub fn compatibility_check(
                 let raw = r.value.as_deref().unwrap_or("");
                 (true, format!("{raw}  (required: {min_ver}+)"))
             }
-            _ => (false, format!("couldn't determine OS version  (required: {min_ver}+)")),
+            _ => (
+                false,
+                format!("couldn't determine OS version  (required: {min_ver}+)"),
+            ),
         };
         rows.push(("OS version".into(), ok, detail));
     }
@@ -205,7 +236,11 @@ pub fn compatibility_check(
         rows.push((
             "admin rights".into(),
             elevated,
-            if elevated { "available".into() } else { "not available".into() },
+            if elevated {
+                "available".into()
+            } else {
+                "not available".into()
+            },
         ));
     }
 
@@ -216,9 +251,15 @@ pub fn compatibility_check(
             Some(r) if r.found => {
                 let raw = r.value.as_deref().unwrap_or("");
                 let version_ok = semver_gte(raw, min_ps);
-                (version_ok, format!("PowerShell {raw}  (required: {min_ps}+)"))
+                (
+                    version_ok,
+                    format!("PowerShell {raw}  (required: {min_ps}+)"),
+                )
             }
-            _ => (false, format!("PowerShell not found  (required: {min_ps}+)")),
+            _ => (
+                false,
+                format!("PowerShell not found  (required: {min_ps}+)"),
+            ),
         };
         rows.push(("PowerShell".into(), ok, detail));
     }
@@ -250,10 +291,13 @@ fn semver_gte(actual: &str, minimum: &str) -> bool {
         let parts: Vec<&str> = s.trim().splitn(4, '.').collect();
         let major = parts.first().and_then(|p| p.parse().ok())?;
         let minor = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
-        let patch = parts.get(2).and_then(|p| {
-            // Strip any suffix like "-LTS"
-            p.split('-').next().and_then(|n| n.parse().ok())
-        }).unwrap_or(0);
+        let patch = parts
+            .get(2)
+            .and_then(|p| {
+                // Strip any suffix like "-LTS"
+                p.split('-').next().and_then(|n| n.parse().ok())
+            })
+            .unwrap_or(0);
         Some((major, minor, patch))
     }
     match (parse(actual), parse(minimum)) {

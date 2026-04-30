@@ -55,7 +55,10 @@ fn render(manifest: &Manifest, plan: &PlacementPlan, frame: &mut Frame) {
         .style(Style::default().bg(palette::SURFACE));
     frame.render_widget(block, card_area);
 
-    let inner = card_area.inner(Margin { horizontal: 2, vertical: 1 });
+    let inner = card_area.inner(Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -90,17 +93,27 @@ fn render(manifest: &Manifest, plan: &PlacementPlan, frame: &mut Frame) {
     );
 
     // Row 1: author + type
-    let type_str = format!("{:?}", manifest.package_type).to_lowercase().replace("_", "-");
+    let type_str = format!("{:?}", manifest.package_type)
+        .to_lowercase()
+        .replace("_", "-");
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                manifest.author.as_deref().map(|a| format!("by {a}")).unwrap_or_default(),
+                manifest
+                    .author
+                    .as_deref()
+                    .map(|a| format!("by {a}"))
+                    .unwrap_or_default(),
                 Style::default().fg(palette::TEXT_DIM),
             ),
             Span::styled(
-                format!("{:>width$}", type_str, width = (inner.width as usize).saturating_sub(
-                    manifest.author.as_deref().map(|a| a.len() + 3).unwrap_or(0)
-                )),
+                format!(
+                    "{:>width$}",
+                    type_str,
+                    width = (inner.width as usize).saturating_sub(
+                        manifest.author.as_deref().map(|a| a.len() + 3).unwrap_or(0)
+                    )
+                ),
                 Style::default().fg(palette::ACCENT),
             ),
         ])),
@@ -148,21 +161,25 @@ fn render(manifest: &Manifest, plan: &PlacementPlan, frame: &mut Frame) {
         })
         .unwrap_or_else(|| "—".into());
 
-    let hooks_label = if manifest.hooks.pre_install.is_some() && manifest.hooks.post_install.is_some() {
-        "pre-install, post-install scripts"
-    } else if manifest.hooks.pre_install.is_some() {
-        "pre-install script"
-    } else if manifest.hooks.post_install.is_some() {
-        "post-install script"
-    } else {
-        "none"
-    };
+    let hooks_label =
+        if manifest.hooks.pre_install.is_some() && manifest.hooks.post_install.is_some() {
+            "pre-install, post-install scripts"
+        } else if manifest.hooks.pre_install.is_some() {
+            "pre-install script"
+        } else if manifest.hooks.post_install.is_some() {
+            "post-install script"
+        } else {
+            "none"
+        };
 
     let meta = [
         ("installs as", command_name.as_str()),
         ("scope", scope_label),
         ("location", &location),
-        ("needs admin", if plan.requires_elevation { "yes" } else { "no" }),
+        (
+            "needs admin",
+            if plan.requires_elevation { "yes" } else { "no" },
+        ),
         ("hooks", hooks_label),
     ];
 
@@ -181,7 +198,10 @@ fn render(manifest: &Manifest, plan: &PlacementPlan, frame: &mut Frame) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("[I]", Style::default().fg(palette::ACCENT).bold()),
-            Span::styled(" settle in          ", Style::default().fg(palette::TEXT_DIM)),
+            Span::styled(
+                " settle in          ",
+                Style::default().fg(palette::TEXT_DIM),
+            ),
             Span::styled("[C]", Style::default().fg(palette::TEXT_DIM).bold()),
             Span::styled(" leave it", Style::default().fg(palette::TEXT_DIM)),
         ]))

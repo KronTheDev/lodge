@@ -13,8 +13,8 @@ pub fn load_builtin(os: &str) -> Result<Vec<Rule>> {
         "linux" => include_str!("../rules/linux.json"),
         other => anyhow::bail!("no built-in ruleset for os: {:?}", other),
     };
-    let rules: Vec<Rule> =
-        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("malformed built-in ruleset for {os}: {e}"))?;
+    let rules: Vec<Rule> = serde_json::from_str(json)
+        .map_err(|e| anyhow::anyhow!("malformed built-in ruleset for {os}: {e}"))?;
     Ok(rules)
 }
 
@@ -25,19 +25,28 @@ mod tests {
     #[test]
     fn windows_ruleset_loads() {
         let rules = load_builtin("windows").unwrap();
-        assert!(!rules.is_empty(), "windows ruleset must have at least one rule");
+        assert!(
+            !rules.is_empty(),
+            "windows ruleset must have at least one rule"
+        );
     }
 
     #[test]
     fn macos_ruleset_loads() {
         let rules = load_builtin("macos").unwrap();
-        assert!(!rules.is_empty(), "macos ruleset must have at least one rule");
+        assert!(
+            !rules.is_empty(),
+            "macos ruleset must have at least one rule"
+        );
     }
 
     #[test]
     fn linux_ruleset_loads() {
         let rules = load_builtin("linux").unwrap();
-        assert!(!rules.is_empty(), "linux ruleset must have at least one rule");
+        assert!(
+            !rules.is_empty(),
+            "linux ruleset must have at least one rule"
+        );
     }
 
     #[test]
@@ -78,8 +87,16 @@ mod tests {
         for os in ["windows", "macos", "linux"] {
             let rules = load_builtin(os).unwrap();
             for rule in &rules {
-                assert!(!rule.destination.user.is_empty(), "rule {} user dest is empty", rule.id);
-                assert!(!rule.destination.system.is_empty(), "rule {} system dest is empty", rule.id);
+                assert!(
+                    !rule.destination.user.is_empty(),
+                    "rule {} user dest is empty",
+                    rule.id
+                );
+                assert!(
+                    !rule.destination.system.is_empty(),
+                    "rule {} system dest is empty",
+                    rule.id
+                );
             }
         }
     }

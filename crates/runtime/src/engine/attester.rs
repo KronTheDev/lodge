@@ -117,6 +117,31 @@ pub fn receipt_dir() -> PathBuf {
     }
 }
 
+/// Reads all receipts from the receipt directory, sorted newest-first.
+///
+/// Silently skips files that can't be parsed (format drift, corruption).
+pub fn list_receipts() -> Vec<Receipt> {
+    let dir = receipt_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+
+    let mut receipts: Vec<(std::time::SystemTime, Receipt)> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+        .filter_map(|e| {
+            let path = e.path();
+            let modified = e.metadata().ok()?.modified().ok()?;
+            let json = std::fs::read_to_string(&path).ok()?;
+            let receipt: Receipt = serde_json::from_str(&json).ok()?;
+            Some((modified, receipt))
+        })
+        .collect();
+
+    receipts.sort_by_key(|r| std::cmp::Reverse(r.0));
+    receipts.into_iter().map(|(_, r)| r).collect()
+}
+
 /// Verifies a receipt's `receipt_hash` field against its own contents.
 ///
 /// Returns `true` if the receipt is intact, `false` if it has been tampered with.
@@ -140,8 +165,8 @@ fn sha256_hex(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lodge_shared::placement::{PlacementEntry, PlacementPlan, RegistrationEffects};
     use lodge_shared::manifest::{Manifest, PackageType, Prefers, Scope};
+    use lodge_shared::placement::{PlacementEntry, PlacementPlan, RegistrationEffects};
     use std::fs;
     use tempfile::tempdir;
 
@@ -152,7 +177,10 @@ mod tests {
             package_type: PackageType::CliTool,
             description: None,
             author: None,
-            prefers: Prefers { scope: Some(Scope::User), ..Default::default() },
+            prefers: Prefers {
+                scope: Some(Scope::User),
+                ..Default::default()
+            },
             requires: Default::default(),
             naming: Default::default(),
             overrides: vec![],
@@ -234,7 +262,12 @@ mod tests {
         };
         assert!(!verify_receipt(&receipt));
         // Tampering after a valid hash
-        let json = serde_json::to_string(&{ let mut r = receipt.clone(); r.receipt_hash = String::new(); r }).unwrap();
+        let json = serde_json::to_string(&{
+            let mut r = receipt.clone();
+            r.receipt_hash = String::new();
+            r
+        })
+        .unwrap();
         receipt.receipt_hash = format!("sha256:{}", sha256_hex(json.as_bytes()));
         // Now tamper
         receipt.version = "9.9.9".into();

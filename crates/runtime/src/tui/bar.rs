@@ -12,9 +12,10 @@ use ratatui::{
     Terminal,
 };
 
-use lodge_brain::Brain;
+use lodge_brain::{Brain, Command};
 
 use super::{palette, splash};
+use crate::engine::attester;
 
 /// Runs the interactive command bar.
 ///
@@ -70,9 +71,8 @@ pub fn run() -> anyhow::Result<()> {
                 (KeyCode::Enter, _) => {
                     let trimmed = input.trim().to_string();
                     if !trimmed.is_empty() {
-                        let response = brain.handle(&trimmed);
+                        let response = handle_command(&mut brain, &trimmed);
                         history.push((trimmed, response));
-                        // Keep only last 6 exchanges in display
                         if history.len() > 6 {
                             history.remove(0);
                         }
@@ -97,6 +97,48 @@ pub fn run() -> anyhow::Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     Ok(())
+}
+
+/// Routes a command through the brain, with runtime-layer overrides for
+/// commands that need access to the local filesystem (history, list).
+fn handle_command(brain: &mut Brain, input: &str) -> String {
+    // Resolve intent first to check the command type
+    let intent = lodge_brain::intent::resolve_deterministic(input);
+    match intent.command {
+        Command::History => format_history(),
+        Command::List => format_installed(),
+        _ => brain.handle(input),
+    }
+}
+
+/// Reads receipts from disk and formats them as an installation history.
+fn format_history() -> String {
+    let receipts = attester::list_receipts();
+    if receipts.is_empty() {
+        return "no installation history.".into();
+    }
+    receipts
+        .iter()
+        .take(10)
+        .map(|r| format!("  {}  v{}  ({})", r.id, r.version, &r.installed_at[..10]))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Reads receipts to determine what's currently installed.
+fn format_installed() -> String {
+    let receipts = attester::list_receipts();
+    if receipts.is_empty() {
+        return "no packages installed yet.".into();
+    }
+    // Deduplicate by id, keeping newest
+    let mut seen = std::collections::HashSet::new();
+    let lines: Vec<String> = receipts
+        .into_iter()
+        .filter(|r| seen.insert(r.id.clone()))
+        .map(|r| format!("  {}  v{}", r.id, r.version))
+        .collect();
+    lines.join("\n")
 }
 
 fn render_bar(input: &str, history: &[(String, String)], frame: &mut ratatui::Frame) {

@@ -1,0 +1,17 @@
+{
+  "id": "cli-full",
+  "version": "2.3.1",
+  "type": "cli-tool",
+  "description": "A fully-specified CLI tool used for integration testing.",
+  "author": "lodge-tests",
+  "prefers": {
+    "scope": "user",
+    "elevation": false,
+    "isolated": false
+  },
+  "as": {
+    "command": "cft",
+    "env_var": "CLI_FULL_HOME",
+    "display_name": "CLI Full Test"
+  }
+}

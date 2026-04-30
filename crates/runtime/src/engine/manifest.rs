@@ -91,7 +91,9 @@ mod tests {
 
     #[test]
     fn command_name_uses_as_command_when_set() {
-        let m = parse(r#"{"id":"mytool","version":"1.0.0","type":"cli-tool","as":{"command":"mt"}}"#).unwrap();
+        let m =
+            parse(r#"{"id":"mytool","version":"1.0.0","type":"cli-tool","as":{"command":"mt"}}"#)
+                .unwrap();
         assert_eq!(m.command_name(), "mt");
     }
 
@@ -148,7 +150,8 @@ mod tests {
     #[test]
     fn unknown_fields_are_ignored() {
         // serde's default deny_unknown_fields is NOT set — extra fields pass through
-        let json = r#"{"id":"mytool","version":"1.0.0","type":"cli-tool","future_field":"whatever"}"#;
+        let json =
+            r#"{"id":"mytool","version":"1.0.0","type":"cli-tool","future_field":"whatever"}"#;
         assert!(parse(json).is_ok());
     }
 
@@ -169,7 +172,10 @@ mod tests {
         for (type_str, expected) in types {
             let json = format!(r#"{{"id":"x","version":"0.1.0","type":"{}"}}"#, type_str);
             let m = parse(&json).unwrap_or_else(|e| panic!("failed for {type_str}: {e}"));
-            assert_eq!(std::mem::discriminant(&m.package_type), std::mem::discriminant(&expected));
+            assert_eq!(
+                std::mem::discriminant(&m.package_type),
+                std::mem::discriminant(&expected)
+            );
         }
     }
 }

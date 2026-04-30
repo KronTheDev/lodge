@@ -1,0 +1,16 @@
+{
+  "id": "with-overrides",
+  "version": "1.0.0",
+  "type": "cli-tool",
+  "overrides": [
+    {
+      "match": "lib/*.dll",
+      "destination": "%APPDATA%\\with-overrides\\lib\\"
+    },
+    {
+      "match": "bin/with-overrides.exe",
+      "destination": "%LOCALAPPDATA%\\Programs\\with-overrides\\",
+      "as": "wo.exe"
+    }
+  ]
+}

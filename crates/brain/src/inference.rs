@@ -35,9 +35,13 @@ pub fn model_path() -> Option<PathBuf> {
         .map(|d| PathBuf::from(d).join("lodge").join("model.gguf"));
 
     #[cfg(not(windows))]
-    let data_dir = std::env::var("HOME")
-        .ok()
-        .map(|h| PathBuf::from(h).join(".local").join("share").join("lodge").join("model.gguf"));
+    let data_dir = std::env::var("HOME").ok().map(|h| {
+        PathBuf::from(h)
+            .join(".local")
+            .join("share")
+            .join("lodge")
+            .join("model.gguf")
+    });
 
     if let Some(p) = data_dir {
         if p.exists() {
@@ -87,17 +91,16 @@ impl InferenceEngine {
         {
             use anyhow::Context as _;
             use llama_cpp_2::{
-                llama_backend::LlamaBackend,
-                model::params::LlamaModelParams,
-                model::LlamaModel,
+                llama_backend::LlamaBackend, model::params::LlamaModelParams, model::LlamaModel,
             };
 
-            let backend = LlamaBackend::init()
-                .context("failed to initialise llama.cpp backend")?;
+            let backend = LlamaBackend::init().context("failed to initialise llama.cpp backend")?;
             let model_params = LlamaModelParams::default();
             let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
                 .with_context(|| format!("failed to load model from {:?}", model_path))?;
-            Ok(Self { inner: ModelInner { backend, model } })
+            Ok(Self {
+                inner: ModelInner { backend, model },
+            })
         }
 
         #[cfg(not(feature = "model"))]
@@ -125,13 +128,16 @@ impl InferenceEngine {
             };
             use std::num::NonZeroU32;
 
-            let ctx_params = LlamaContextParams::default()
-                .with_n_ctx(NonZeroU32::new(2048));
-            let mut ctx = self.inner.model
+            let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(2048));
+            let mut ctx = self
+                .inner
+                .model
                 .new_context(&self.inner.backend, ctx_params)
                 .context("failed to create inference context")?;
 
-            let tokens = self.inner.model
+            let tokens = self
+                .inner
+                .model
                 .str_to_token(prompt, AddBos::Always)
                 .context("failed to tokenize prompt")?;
 
@@ -139,15 +145,14 @@ impl InferenceEngine {
             let mut batch = LlamaBatch::new(n_input.max(1), 1);
             for (i, &tok) in tokens.iter().enumerate() {
                 let is_last = i == n_input - 1;
-                batch.add(tok, i as i32, &[0], is_last)
+                batch
+                    .add(tok, i as i32, &[0], is_last)
                     .context("failed to add token to batch")?;
             }
             ctx.decode(&mut batch).context("decode failed")?;
 
-            let mut sampler = LlamaSampler::chain_simple([
-                LlamaSampler::temp(0.1),
-                LlamaSampler::greedy(),
-            ]);
+            let mut sampler =
+                LlamaSampler::chain_simple([LlamaSampler::temp(0.1), LlamaSampler::greedy()]);
 
             let mut output = String::new();
             let mut n_cur = n_input;
@@ -169,7 +174,8 @@ impl InferenceEngine {
                 }
 
                 batch.clear();
-                batch.add(token, n_cur as i32, &[0], true)
+                batch
+                    .add(token, n_cur as i32, &[0], true)
                     .context("failed to add token to next batch")?;
                 n_cur += 1;
                 ctx.decode(&mut batch).context("decode failed")?;

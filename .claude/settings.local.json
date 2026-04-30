@@ -9,7 +9,21 @@
       "Bash(cargo test:*)",
       "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d.get\\('number'\\), d.get\\('title'\\)\\)\")",
       "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d.get\\('number'\\), d.get\\('title'\\), d.get\\('message',''\\)\\)\")",
-      "Bash(cargo clippy:*)"
+      "Bash(cargo clippy:*)",
+      "Bash(cp \"C:/Users/andri/GitProj/lodge/assets/photo_2026-04-28_11-31-01.jpg\" \"C:/Users/andri/GitProj/lodge/assets/cabin.jpg\")",
+      "Bash(python scripts/gen_splash_art.py)",
+      "Bash(cargo build:*)",
+      "Bash(xxd)",
+      "Bash(python:*)",
+      "Bash(node -e ':*)",
+      "Bash(node:*)",
+      "Bash(cmake --version)",
+      "Bash(cl)",
+      "Bash(cc --version)",
+      "Bash(c++ --version)",
+      "Bash(rustup show:*)",
+      "Bash(rustup target:*)",
+      "Bash(cargo fmt:*)"
     ]
   }
 }

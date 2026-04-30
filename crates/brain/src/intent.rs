@@ -33,7 +33,12 @@ pub struct Intent {
 }
 
 fn intent(command: Command, args: Value, confidence: f32) -> Intent {
-    Intent { command, args, confidence, prompt: None }
+    Intent {
+        command,
+        args,
+        confidence,
+        prompt: None,
+    }
 }
 
 fn clarify(prompt: impl Into<String>) -> Intent {
@@ -65,13 +70,9 @@ pub fn resolve_deterministic(input: &str) -> Intent {
 
         ["history"] => intent(Command::History, json!({}), 1.0),
 
-        ["install", target, ..] => {
-            intent(Command::Install, json!({ "target": target }), 0.95)
-        }
+        ["install", target, ..] => intent(Command::Install, json!({ "target": target }), 0.95),
 
-        ["uninstall", id] | ["remove", id] => {
-            intent(Command::Uninstall, json!({ "id": id }), 0.95)
-        }
+        ["uninstall", id] | ["remove", id] => intent(Command::Uninstall, json!({ "id": id }), 0.95),
 
         ["update", "all"] => intent(Command::UpdateAll, json!({}), 1.0),
         ["update", "rulesets"] => intent(Command::UpdateRulesets, json!({}), 1.0),
@@ -130,7 +131,10 @@ fn classify_explore(input: &str) -> Intent {
     }
 
     // Node
-    if words.iter().any(|w| ["node", "nodejs", "node.js"].contains(w)) {
+    if words
+        .iter()
+        .any(|w| ["node", "nodejs", "node.js"].contains(w))
+    {
         return intent(
             Command::Explore,
             json!({ "probe": "node_version", "probe_args": {} }),
@@ -139,7 +143,9 @@ fn classify_explore(input: &str) -> Intent {
     }
 
     // PowerShell
-    if words.iter().any(|w| ["ps", "powershell", "pwsh"].contains(w))
+    if words
+        .iter()
+        .any(|w| ["ps", "powershell", "pwsh"].contains(w))
         || input.contains("ps version")
         || input.contains("powershell version")
     {
@@ -160,7 +166,10 @@ fn classify_explore(input: &str) -> Intent {
     }
 
     // Python
-    if words.iter().any(|w| ["python", "python3", "py"].contains(w)) {
+    if words
+        .iter()
+        .any(|w| ["python", "python3", "py"].contains(w))
+    {
         return intent(
             Command::Explore,
             json!({ "probe": "python_version", "probe_args": {} }),
@@ -178,7 +187,10 @@ fn classify_explore(input: &str) -> Intent {
     }
 
     // Disk / space / storage
-    if words.iter().any(|w| ["disk", "space", "free", "storage", "drive"].contains(w)) {
+    if words
+        .iter()
+        .any(|w| ["disk", "space", "free", "storage", "drive"].contains(w))
+    {
         let path = extract_drive_or_path(input);
         return intent(
             Command::Explore,
@@ -188,8 +200,12 @@ fn classify_explore(input: &str) -> Intent {
     }
 
     // OS / build
-    if words.iter().any(|w| ["os", "build", "winver", "uname", "version"].contains(w))
-        && words.iter().any(|w| ["os", "build", "windows", "linux", "mac"].contains(w))
+    if words
+        .iter()
+        .any(|w| ["os", "build", "winver", "uname", "version"].contains(w))
+        && words
+            .iter()
+            .any(|w| ["os", "build", "windows", "linux", "mac"].contains(w))
     {
         return intent(
             Command::Explore,
@@ -199,7 +215,10 @@ fn classify_explore(input: &str) -> Intent {
     }
 
     // Architecture
-    if words.iter().any(|w| ["arch", "architecture", "cpu"].contains(w)) {
+    if words
+        .iter()
+        .any(|w| ["arch", "architecture", "cpu"].contains(w))
+    {
         return intent(
             Command::Explore,
             json!({ "probe": "arch", "probe_args": {} }),
@@ -208,7 +227,10 @@ fn classify_explore(input: &str) -> Intent {
     }
 
     // Service
-    if words.iter().any(|w| ["service", "daemon", "svc"].contains(w)) {
+    if words
+        .iter()
+        .any(|w| ["service", "daemon", "svc"].contains(w))
+    {
         let name = extract_word_after(input, &["service", "daemon"]).unwrap_or_default();
         return intent(
             Command::Explore,
@@ -218,7 +240,9 @@ fn classify_explore(input: &str) -> Intent {
     }
 
     // Process
-    if words.iter().any(|w| ["process", "running", "processes", "task"].contains(w))
+    if words
+        .iter()
+        .any(|w| ["process", "running", "processes", "task"].contains(w))
         && !words.contains(&"install")
     {
         let name = extract_word_after(input, &["process", "running"]).unwrap_or_default();
@@ -230,7 +254,10 @@ fn classify_explore(input: &str) -> Intent {
     }
 
     // Env var
-    if words.iter().any(|w| ["env", "environment", "variable"].contains(w)) {
+    if words
+        .iter()
+        .any(|w| ["env", "environment", "variable"].contains(w))
+    {
         let name = extract_env_var_name(input);
         return intent(
             Command::Explore,
@@ -240,7 +267,10 @@ fn classify_explore(input: &str) -> Intent {
     }
 
     // Path / file / folder
-    if words.iter().any(|w| ["path", "exist", "exists", "file", "folder", "directory"].contains(w)) {
+    if words
+        .iter()
+        .any(|w| ["path", "exist", "exists", "file", "folder", "directory"].contains(w))
+    {
         if let Some(path) = extract_quoted_or_backslash(input) {
             return intent(
                 Command::Explore,
@@ -279,7 +309,10 @@ fn extract_port(input: &str) -> Option<String> {
 fn extract_drive_or_path(input: &str) -> String {
     // Look for C:, D:, or a quoted path
     for word in input.split_whitespace() {
-        if word.len() == 2 && word.chars().next().unwrap_or(' ').is_alphabetic() && word.ends_with(':') {
+        if word.len() == 2
+            && word.chars().next().unwrap_or(' ').is_alphabetic()
+            && word.ends_with(':')
+        {
             return format!("{word}\\");
         }
     }
@@ -287,7 +320,11 @@ fn extract_drive_or_path(input: &str) -> String {
         return p;
     }
     // Default to C:\ on Windows, / elsewhere
-    if cfg!(windows) { "C:\\".into() } else { "/".into() }
+    if cfg!(windows) {
+        "C:\\".into()
+    } else {
+        "/".into()
+    }
 }
 
 fn extract_quoted_or_backslash(input: &str) -> Option<String> {
@@ -300,7 +337,12 @@ fn extract_quoted_or_backslash(input: &str) -> Option<String> {
     // Extract word containing backslash or forward slash
     for word in input.split_whitespace() {
         if word.contains('\\') || (word.contains('/') && word.len() > 1) {
-            return Some(word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\\' && c != '/' && c != ':').to_string());
+            return Some(
+                word.trim_matches(|c: char| {
+                    !c.is_alphanumeric() && c != '\\' && c != '/' && c != ':'
+                })
+                .to_string(),
+            );
         }
     }
     None
@@ -331,8 +373,15 @@ fn extract_env_var_name(input: &str) -> String {
     }
     // Look for an ALL_CAPS word
     for word in input.split_whitespace() {
-        let clean: String = word.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect();
-        if clean.len() >= 2 && clean.chars().all(|c| c.is_uppercase() || c == '_' || c.is_ascii_digit()) {
+        let clean: String = word
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if clean.len() >= 2
+            && clean
+                .chars()
+                .all(|c| c.is_uppercase() || c == '_' || c.is_ascii_digit())
+        {
             return clean;
         }
     }
@@ -345,14 +394,17 @@ fn extract_env_var_name(input: &str) -> String {
 ///
 /// This ensures the prompt is always in sync with registered probes.
 pub fn build_system_prompt() -> String {
-    let probe_list: Vec<String> = crate::scout::PROBES.iter().map(|p| {
-        let args = if p.args.is_empty() {
-            "no args".to_string()
-        } else {
-            p.args.join(", ")
-        };
-        format!("  - {} ({}): {}", p.name, args, p.description)
-    }).collect();
+    let probe_list: Vec<String> = crate::scout::PROBES
+        .iter()
+        .map(|p| {
+            let args = if p.args.is_empty() {
+                "no args".to_string()
+            } else {
+                p.args.join(", ")
+            };
+            format!("  - {} ({}): {}", p.name, args, p.description)
+        })
+        .collect();
 
     format!(
         r#"You are the intent resolver for Lodge, a package installation runtime.
@@ -460,7 +512,11 @@ mod tests {
     fn system_prompt_contains_all_probes() {
         let prompt = build_system_prompt();
         for probe in crate::scout::PROBES {
-            assert!(prompt.contains(probe.name), "probe {} missing from system prompt", probe.name);
+            assert!(
+                prompt.contains(probe.name),
+                "probe {} missing from system prompt",
+                probe.name
+            );
         }
     }
 }

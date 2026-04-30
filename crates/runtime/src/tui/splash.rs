@@ -1,3 +1,4 @@
+use ansi_to_tui::IntoText;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
     style::Style,
@@ -21,19 +22,22 @@ const WORDMARK: &str = "\
  ███████╗╚██████╔╝██████╔╝╚██████╔╝███████╗\n\
  ╚══════╝ ╚═════╝ ╚═════╝  ╚═════╝ ╚══════╝";
 
-const VERSION_LINE: &str = concat!("v", env!("CARGO_PKG_VERSION"), "  ·  a place for everything");
+const VERSION_LINE: &str = concat!(
+    "v",
+    env!("CARGO_PKG_VERSION"),
+    "  ·  a place for everything"
+);
 
 /// Renders the Lodge splash screen into `frame`.
 ///
 /// Layout (vertically centred):
-/// 1. Cabin bracket art — 21 rows
+/// 1. Cabin bracket art — 21 rows, ANSI truecolor
 /// 2. Blank line
-/// 3. ASCII wordmark — 6 rows
-/// 4. Version line
+/// 3. ASCII wordmark — 6 rows, accent colour
+/// 4. Version / tagline line
 pub fn render(frame: &mut Frame) {
     let area = frame.area();
 
-    // If the terminal is too narrow for the full art, show a minimal version.
     let narrow = area.width < 82;
 
     let art_height = 21u16;
@@ -53,17 +57,18 @@ pub fn render(frame: &mut Frame) {
         ])
         .split(area);
 
-    // Cabin art
+    // Cabin art — convert ANSI escape sequences to ratatui spans
     if !narrow {
-        let art_widget = Paragraph::new(art::CABIN_ART).alignment(Alignment::Center);
+        let art_text = art::CABIN_ART.as_bytes().into_text().unwrap_or_default();
+        let art_widget = Paragraph::new(art_text).alignment(Alignment::Center);
         frame.render_widget(art_widget, chunks[1]);
     }
 
     // Wordmark
     let wordmark_style = Style::default().fg(palette::ACCENT);
     if narrow {
-        let simple = Paragraph::new(Span::styled("lodge", wordmark_style))
-            .alignment(Alignment::Center);
+        let simple =
+            Paragraph::new(Span::styled("lodge", wordmark_style)).alignment(Alignment::Center);
         frame.render_widget(simple, chunks[3]);
     } else {
         let wordmark_widget = Paragraph::new(
@@ -77,7 +82,10 @@ pub fn render(frame: &mut Frame) {
     }
 
     // Version / tagline
-    let version_widget = Paragraph::new(Span::styled(VERSION_LINE, Style::default().fg(palette::TEXT_DIM)))
-        .alignment(Alignment::Center);
+    let version_widget = Paragraph::new(Span::styled(
+        VERSION_LINE,
+        Style::default().fg(palette::TEXT_DIM),
+    ))
+    .alignment(Alignment::Center);
     frame.render_widget(version_widget, chunks[4]);
 }

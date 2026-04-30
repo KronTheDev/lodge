@@ -1,5 +1,5 @@
-mod engine;
-mod shim;
+use lodge::engine;
+use lodge::shim;
 mod tui;
 
 use std::path::Path;
@@ -87,8 +87,13 @@ fn run_install(pkg_path: &Path) -> anyhow::Result<()> {
     }
 
     // Sequence — execute and display
-    let hooks_run =
-        tui::sequence::run(&manifest.id, &manifest.version, &plan, pkg_path, &mut terminal)?;
+    let hooks_run = tui::sequence::run(
+        &manifest.id,
+        &manifest.version,
+        &plan,
+        pkg_path,
+        &mut terminal,
+    )?;
 
     // Restore terminal
     disable_raw_mode()?;
@@ -102,10 +107,7 @@ fn run_install(pkg_path: &Path) -> anyhow::Result<()> {
     use lodge_shared::manifest::PackageType;
     if matches!(manifest.package_type, PackageType::CliTool) {
         if let Some(first_entry) = plan.entries.first() {
-            shim::register::register(
-                manifest.command_name(),
-                &first_entry.destination,
-            )?;
+            shim::register::register(manifest.command_name(), &first_entry.destination)?;
         }
     }
 

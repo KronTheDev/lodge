@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// A resolved source → destination pair for a single file.
 #[derive(Debug, Clone, Serialize, Deserialize)]

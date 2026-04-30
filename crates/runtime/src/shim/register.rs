@@ -10,7 +10,10 @@ pub fn shim_dir() -> PathBuf {
     #[cfg(windows)]
     {
         let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-        PathBuf::from(base).join("Programs").join("lodge").join("shims")
+        PathBuf::from(base)
+            .join("Programs")
+            .join("lodge")
+            .join("shims")
     }
     #[cfg(not(windows))]
     {
@@ -64,8 +67,7 @@ pub fn unregister(command_name: &str) -> Result<()> {
     let path = dir.join(command_name);
 
     if path.exists() || path.is_symlink() {
-        std::fs::remove_file(&path)
-            .with_context(|| format!("couldn't remove shim {:?}", path))?;
+        std::fs::remove_file(&path).with_context(|| format!("couldn't remove shim {:?}", path))?;
     }
     Ok(())
 }
@@ -89,7 +91,10 @@ mod tests {
         #[cfg(windows)]
         {
             let shim = shim_dir.join(format!("{}.cmd", command_name));
-            let content = format!("@echo off\r\n\"{target}\" %*\r\n", target = target.display());
+            let content = format!(
+                "@echo off\r\n\"{target}\" %*\r\n",
+                target = target.display()
+            );
             std::fs::write(&shim, content)?;
         }
         #[cfg(not(windows))]
@@ -113,7 +118,10 @@ mod tests {
         let shim_path = shim_dir.path().join("mt.cmd");
         let content = std::fs::read_to_string(&shim_path).unwrap();
         assert!(content.contains("mt.exe"), "shim must reference the target");
-        assert!(content.starts_with("@echo off"), "shim must start with @echo off");
+        assert!(
+            content.starts_with("@echo off"),
+            "shim must start with @echo off"
+        );
     }
 
     #[test]

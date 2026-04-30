@@ -13,11 +13,7 @@ use crate::types::Rule;
 ///   `bin/*` matches `bin/lodge` but not `lib/lodge`.
 ///
 /// Lower `rule.priority` value wins. Returns `None` if no rule matches.
-pub fn best_match<'a>(
-    rules: &'a [Rule],
-    package_type: &str,
-    file_path: &str,
-) -> Option<&'a Rule> {
+pub fn best_match<'a>(rules: &'a [Rule], package_type: &str, file_path: &str) -> Option<&'a Rule> {
     let filename = Path::new(file_path)
         .file_name()
         .and_then(|n| n.to_str())
@@ -41,8 +37,7 @@ pub fn best_match<'a>(
                 if r.r#match.contains('/') {
                     compiled.matches_with(file_path, opts)
                 } else {
-                    compiled.matches_with(file_path, opts)
-                        || compiled.matches_with(filename, opts)
+                    compiled.matches_with(file_path, opts) || compiled.matches_with(filename, opts)
                 }
             })
         })
@@ -194,7 +189,10 @@ mod tests {
     fn cli_tool_rules_do_not_match_font_type() {
         let rules = windows_rules();
         let rule = best_match(&rules, "font", "setup.exe");
-        assert!(rule.is_none(), "cli-tool exe rule must not apply to font package type");
+        assert!(
+            rule.is_none(),
+            "cli-tool exe rule must not apply to font package type"
+        );
     }
 
     #[test]
