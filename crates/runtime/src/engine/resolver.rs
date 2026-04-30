@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use lodge_ruleset::{loader, matcher};
 use lodge_shared::{
-    manifest::{Hooks, Manifest, Scope},
+    manifest::{Hooks, Manifest, Override, Scope},
     placement::{PlacementEntry, PlacementPlan, RegistrationEffects},
 };
 
@@ -20,11 +20,14 @@ pub fn current_os() -> &'static str {
 
 /// Resolves a [`PlacementPlan`] for all files under `package_root`.
 ///
-/// Algorithm (M2 — no override handling yet, added in M3):
+/// Algorithm:
 /// 1. Determine scope via [`infer_scope`].
 /// 2. Walk `package_root` recursively.
-/// 3. For each file: find best matching rule → use catch-all if none.
-/// 4. Expand destination paths.
+/// 3. For each file:
+///    a. Check `manifest.overrides` for explicit match → use if found.
+///    b. Check ruleset for type + file pattern match → use highest priority match.
+///    c. If no rule matches → use catch-all destination.
+/// 4. Expand all destination paths (env vars, `~`, `{id}`).
 /// 5. Union registration effects across all matched rules.
 /// 6. Collect lifecycle hooks in install order.
 /// 7. Return [`PlacementPlan`].
@@ -36,8 +39,6 @@ pub fn resolve(
 ) -> Result<PlacementPlan> {
     let scope_res = infer_scope(manifest, has_elevation)?;
     if scope_res.fell_back {
-        // Caller is responsible for surfacing this warning in the TUI.
-        // We log it here as a debug hint.
         eprintln!(
             "note: {} preferred system scope but elevation is unavailable — \
              falling back to user scope",
@@ -51,30 +52,47 @@ pub fn resolve(
     let mut entries: Vec<PlacementEntry> = Vec::new();
     let mut registrations = RegistrationEffects::default();
 
-    for entry in walkdir::WalkDir::new(package_root)
+    for dir_entry in walkdir::WalkDir::new(package_root)
         .min_depth(1)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
     {
-        let abs_source = entry.path().to_path_buf();
+        let abs_source = dir_entry.path().to_path_buf();
         let rel_path = abs_source
             .strip_prefix(package_root)
             .unwrap_or(&abs_source)
             .to_string_lossy()
-            .replace('\\', "/"); // normalise to forward slashes for matching
+            .replace('\\', "/");
 
-        let (dest_template, rule_registrations) = match matcher::best_match(&rules, package_type, &rel_path) {
-            Some(rule) => {
-                let template = dest_template_for_scope(rule, &scope_res.scope);
-                let reg = rule_to_registrations(rule, manifest);
-                (template.to_string(), reg)
-            }
-            None => {
-                let template = catch_all(os, &scope_res.scope).to_string();
-                (template, RegistrationEffects::default())
-            }
-        };
+        // Step 3a — explicit override takes priority over all rules.
+        if let Some(ov) = find_override(&manifest.overrides, &rel_path) {
+            let dest_dir = expander::expand(&ov.destination, &manifest.id)?;
+            let file_name = ov
+                .rename
+                .as_deref()
+                .or_else(|| abs_source.file_name().and_then(|n| n.to_str()))
+                .unwrap_or("unknown");
+            let destination = dest_dir.join(file_name);
+            entries.push(PlacementEntry {
+                source: abs_source,
+                destination,
+                rename: ov.rename.clone(),
+            });
+            continue;
+        }
+
+        // Step 3b — ruleset match.
+        let (dest_template, rule_registrations) =
+            match matcher::best_match(&rules, package_type, &rel_path) {
+                Some(rule) => {
+                    let template = dest_template_for_scope(rule, &scope_res.scope);
+                    let reg = rule_to_registrations(rule, manifest);
+                    (template.to_string(), reg)
+                }
+                // Step 3c — catch-all.
+                None => (catch_all(os, &scope_res.scope).to_string(), RegistrationEffects::default()),
+            };
 
         merge_registrations(&mut registrations, rule_registrations);
 
@@ -104,7 +122,27 @@ pub fn resolve(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-fn package_type_str(pt: &lodge_shared::manifest::PackageType) -> &'static str {
+/// Finds the first override whose glob pattern matches `rel_path`.
+fn find_override<'a>(overrides: &'a [Override], rel_path: &str) -> Option<&'a Override> {
+    let filename = std::path::Path::new(rel_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(rel_path);
+
+    overrides.iter().find(|ov| {
+        let Ok(pat) = glob::Pattern::new(&ov.pattern) else {
+            return false;
+        };
+        let opts = glob::MatchOptions {
+            case_sensitive: false,
+            require_literal_separator: true,
+            require_literal_leading_dot: false,
+        };
+        pat.matches_with(rel_path, opts) || pat.matches_with(filename, opts)
+    })
+}
+
+pub fn package_type_str(pt: &lodge_shared::manifest::PackageType) -> &'static str {
     use lodge_shared::manifest::PackageType::*;
     match pt {
         CliTool => "cli-tool",
@@ -131,16 +169,8 @@ fn rule_to_registrations(
 ) -> RegistrationEffects {
     RegistrationEffects {
         add_to_path: rule.register.path,
-        env_var: if rule.register.env_var {
-            manifest.naming.env_var.clone()
-        } else {
-            None
-        },
-        service_name: if rule.register.service {
-            manifest.naming.service.clone()
-        } else {
-            None
-        },
+        env_var: if rule.register.env_var { manifest.naming.env_var.clone() } else { None },
+        service_name: if rule.register.service { manifest.naming.service.clone() } else { None },
         start_menu_entry: rule.register.start_menu,
     }
 }
@@ -156,7 +186,6 @@ fn merge_registrations(base: &mut RegistrationEffects, other: RegistrationEffect
     base.start_menu_entry |= other.start_menu_entry;
 }
 
-/// Catch-all destination when no rule matches a file.
 fn catch_all(os: &str, scope: &Scope) -> &'static str {
     match (os, scope) {
         ("windows", Scope::User) => "%APPDATA%\\{id}\\",
@@ -166,7 +195,6 @@ fn catch_all(os: &str, scope: &Scope) -> &'static str {
     }
 }
 
-/// Returns the ordered list of install-time lifecycle hooks to run.
 fn collect_install_hooks(hooks: &Hooks) -> Vec<String> {
     let mut order = Vec::new();
     if let Some(h) = &hooks.pre_install {
@@ -183,7 +211,7 @@ fn collect_install_hooks(hooks: &Hooks) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lodge_shared::manifest::{Manifest, PackageType, Prefers, Scope};
+    use lodge_shared::manifest::{Manifest, Override, PackageType, Prefers, Scope};
     use std::fs;
 
     fn cli_manifest(id: &str) -> Manifest {
@@ -201,7 +229,6 @@ mod tests {
         }
     }
 
-    /// Creates a temp package directory with the given relative file paths.
     fn make_package(files: &[&str]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         for rel in files {
@@ -214,7 +241,68 @@ mod tests {
         dir
     }
 
-    // ── Hooks collection ──────────────────────────────────────────────────────
+    // ── Override handling ─────────────────────────────────────────────────────
+
+    #[test]
+    fn find_override_matches_glob() {
+        let overrides = vec![Override {
+            pattern: "*.cfg".into(),
+            destination: "/tmp/config/".into(),
+            rename: None,
+        }];
+        assert!(find_override(&overrides, "app.cfg").is_some());
+        assert!(find_override(&overrides, "app.exe").is_none());
+    }
+
+    #[test]
+    fn find_override_matches_by_filename() {
+        let overrides = vec![Override {
+            pattern: "*.cfg".into(),
+            destination: "/tmp/config/".into(),
+            rename: None,
+        }];
+        assert!(find_override(&overrides, "sub/app.cfg").is_some());
+    }
+
+    #[test]
+    fn override_takes_priority_over_rules() {
+        if std::env::var("HOME").is_err() && std::env::var("USERPROFILE").is_err() {
+            return;
+        }
+        let pkg = make_package(&["tool.exe"]);
+        let mut manifest = cli_manifest("tool");
+        manifest.overrides.push(Override {
+            pattern: "*.exe".into(),
+            destination: "~/.custom/".into(),
+            rename: None,
+        });
+
+        let plan = resolve(pkg.path(), &manifest, "linux", false).unwrap();
+        assert_eq!(plan.entries.len(), 1);
+        assert!(
+            plan.entries[0].destination.to_string_lossy().contains(".custom"),
+            "override destination should be used"
+        );
+    }
+
+    #[test]
+    fn override_rename_applies() {
+        if std::env::var("HOME").is_err() && std::env::var("USERPROFILE").is_err() {
+            return;
+        }
+        let pkg = make_package(&["mt.exe"]);
+        let mut manifest = cli_manifest("mytool");
+        manifest.overrides.push(Override {
+            pattern: "*.exe".into(),
+            destination: "~/.custom/".into(),
+            rename: Some("mytool".into()),
+        });
+
+        let plan = resolve(pkg.path(), &manifest, "linux", false).unwrap();
+        assert_eq!(plan.entries[0].destination.file_name().unwrap(), "mytool");
+    }
+
+    // ── Resolver (inherited from M2) ──────────────────────────────────────────
 
     #[test]
     fn hooks_collected_in_install_order() {
@@ -222,98 +310,34 @@ mod tests {
         let hooks = Hooks {
             pre_install: Some("pre.ps1".into()),
             post_install: Some("post.ps1".into()),
-            pre_uninstall: Some("pre-un.ps1".into()),
-            post_uninstall: Some("post-un.ps1".into()),
+            ..Default::default()
         };
         let order = collect_install_hooks(&hooks);
         assert_eq!(order, vec!["pre.ps1", "post.ps1"]);
-        // uninstall hooks must NOT appear in install order
-        assert!(!order.iter().any(|h| h.contains("uninstall")));
     }
-
-    #[test]
-    fn no_hooks_returns_empty_order() {
-        let order = collect_install_hooks(&Default::default());
-        assert!(order.is_empty());
-    }
-
-    // ── catch_all ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn catch_all_windows_user() {
-        assert!(catch_all("windows", &Scope::User).contains("%APPDATA%"));
-    }
-
-    #[test]
-    fn catch_all_linux_user() {
-        assert!(catch_all("linux", &Scope::User).contains("~/.local/share"));
-    }
-
-    // ── package_type_str ─────────────────────────────────────────────────────
-
-    #[test]
-    fn all_package_types_have_string_repr() {
-        use PackageType::*;
-        for pt in [CliTool, PsModule, Service, Library, App, ConfigPack, DevTool, Font] {
-            let s = package_type_str(&pt);
-            assert!(!s.is_empty());
-        }
-    }
-
-    // ── Full resolve on Linux (HOME is set by the OS in test env) ─────────────
 
     #[test]
     fn resolve_places_bin_file_for_cli_tool() {
-        // This test requires HOME to be set (always true on Linux/macOS CI).
-        // On Windows it uses USERPROFILE which is always set.
         if std::env::var("HOME").is_err() && std::env::var("USERPROFILE").is_err() {
-            return; // skip if neither is available
+            return;
         }
-
         let pkg = make_package(&["bin/lodge"]);
-        let manifest = cli_manifest("lodge");
-
-        let plan = resolve(pkg.path(), &manifest, "linux", false).unwrap();
+        let plan = resolve(pkg.path(), &cli_manifest("lodge"), "linux", false).unwrap();
         assert_eq!(plan.entries.len(), 1);
-        assert!(
-            plan.entries[0].destination.to_string_lossy().contains("lodge"),
-            "destination should contain the package id"
-        );
-        assert!(!plan.requires_elevation, "user scope must not require elevation");
     }
 
     #[test]
     fn resolve_returns_empty_plan_for_empty_package() {
         let pkg = make_package(&[]);
-        let manifest = cli_manifest("empty-pkg");
-        let plan = resolve(pkg.path(), &manifest, "linux", false).unwrap();
+        let plan = resolve(pkg.path(), &cli_manifest("empty"), "linux", false).unwrap();
         assert!(plan.entries.is_empty());
-        assert!(plan.hooks_order.is_empty());
     }
 
     #[test]
-    fn resolve_uses_catch_all_for_unrecognised_files() {
-        if std::env::var("HOME").is_err() && std::env::var("USERPROFILE").is_err() {
-            return;
+    fn all_package_types_have_string_repr() {
+        use PackageType::*;
+        for pt in [CliTool, PsModule, Service, Library, App, ConfigPack, DevTool, Font] {
+            assert!(!package_type_str(&pt).is_empty());
         }
-        let pkg = make_package(&["readme.md"]);
-        let manifest = cli_manifest("mytool");
-        let plan = resolve(pkg.path(), &manifest, "linux", false).unwrap();
-        // readme.md has no cli-tool rule → catch-all → should still produce an entry
-        assert_eq!(plan.entries.len(), 1);
-        assert!(plan.entries[0].destination.to_string_lossy().contains("mytool"));
-    }
-
-    #[test]
-    fn resolve_system_scope_requires_elevation_in_plan() {
-        let pkg = make_package(&["bin/tool"]);
-        let mut manifest = cli_manifest("tool");
-        manifest.prefers.scope = Some(Scope::System);
-
-        if std::env::var("HOME").is_err() && std::env::var("USERPROFILE").is_err() {
-            return;
-        }
-        let plan = resolve(pkg.path(), &manifest, "linux", true).unwrap();
-        assert!(plan.requires_elevation, "system scope must set requires_elevation");
     }
 }

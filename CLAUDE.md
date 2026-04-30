@@ -1132,6 +1132,59 @@ behaviour. Test context window rollover.
 
 ---
 
+## Lodger — Desktop Mascot Companion (Pre-Release Addition)
+
+Before the v0.1.0 public release, Lodge will ship an optional desktop
+companion tentatively named **Lodger** (name not final). The reference
+point is the ambient desktop mascots of the early 2000s — characters that
+lived on the desktop outside any window, reacted to what the user was doing,
+and spoke aloud. Lodger is that archetype applied to a developer tool:
+a small pixelated stick figure (a piece of firewood — consistent with the
+cabin metaphor) that sits on the desktop while Lodge runs in the terminal.
+
+### What Lodger is
+
+A **separate, optional `.exe`** that runs alongside the Lodge terminal
+session. It is a desktop-native window (frameless, transparent background,
+always-on-top) hosting a pixel-art animated character. Lodger:
+
+- Displays **pixelated sprite animations** on the desktop — idle, reacting
+  to installation events, curious when a probe runs, relieved when something
+  settles in, unsettled when something fails
+- **Receives events from Lodge via IPC** (named pipe or local socket) —
+  Lodge pushes plain-text messages to Lodger as things happen in the terminal
+- **Outputs via TTS** — speaks Lodge's calm commentary aloud using the
+  platform speech API. TTS is opt-in, toggled from the Lodge command bar
+  (`> lodger on`, `> lodger off`, `> lodger volume 50`)
+- Assists with **system and file exploration questions** — when the user
+  asks a scout-routed question in the terminal, Lodger reacts and voices
+  the result if TTS is on
+
+### Design constraints
+
+- Ships as `lodger.exe` (Windows primary) alongside `lodge.exe` — a
+  separate binary, not embedded in the runtime
+- Frameless transparent desktop window; character rendered as a sprite sheet
+  with frame-based animation loop
+- IPC channel is one-directional Lodge → Lodger; Lodger does not send
+  commands back to Lodge
+- TTS uses platform speech APIs: SAPI on Windows, AVSpeechSynthesizer on
+  macOS, espeak/speech-dispatcher on Linux
+- Lodger spawned automatically when Lodge starts if present in the same
+  directory; exits when Lodge exits
+- If `lodger.exe` is absent, Lodge runs exactly as normal — the companion
+  is entirely optional with zero impact on the core runtime
+
+### Scope
+
+Lodger is a pre-release addition outside the Phase 1 milestone plan.
+It is designed and implemented after M6 closes, as a standalone companion
+binary. It will be added as `crates/lodger/` in the workspace at that time.
+
+The name **Lodger** is provisional. Finalise before implementation begins.
+
+---
+
 ## Known Open Questions
 
 These are decisions deferred to implementation time:
