@@ -32,6 +32,16 @@ enum Command {
         /// Path to the package directory containing a lodge.json manifest.
         package: String,
     },
+    /// Remove an installed package by id.
+    Uninstall {
+        /// Package id to remove.
+        id: String,
+    },
+    /// Switch the active version shim for an installed package.
+    Use {
+        /// Version spec in the form id@version (e.g. mytool@1.0.0).
+        spec: String,
+    },
     /// Open the interactive command bar (default when no subcommand is given).
     Bar,
 }
@@ -46,6 +56,12 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Install { package }) => {
             let pkg_path = Path::new(&package);
             run_install(pkg_path)?;
+        }
+        Some(Command::Uninstall { id }) => {
+            run_uninstall_cli(&id)?;
+        }
+        Some(Command::Use { spec }) => {
+            run_use_cli(&spec)?;
         }
     }
 
@@ -117,4 +133,51 @@ fn run_install(pkg_path: &Path) -> anyhow::Result<()> {
 
     println!("{} v{} settled in.", manifest.id, manifest.version);
     Ok(())
+}
+
+/// Removes an installed package by id.
+fn run_uninstall_cli(id: &str) -> anyhow::Result<()> {
+    let result = engine::uninstall::uninstall(id)?;
+
+    println!("{id} removed.");
+    if !result.missing_files.is_empty() {
+        println!("  {} file(s) were already gone.", result.missing_files.len());
+    }
+    if result.shim_removed {
+        println!("  shim unregistered.");
+    }
+    Ok(())
+}
+
+/// Switches the active version shim for an installed package.
+///
+/// `spec` must be in the form `id@version` (e.g. `mytool@1.0.0`).
+fn run_use_cli(spec: &str) -> anyhow::Result<()> {
+    let (id, version) = parse_version_spec(spec)
+        .ok_or_else(|| anyhow::anyhow!("invalid spec '{spec}' — expected id@version"))?;
+
+    let receipts = engine::attester::list_receipts();
+    let receipt = receipts
+        .into_iter()
+        .find(|r| r.id == id && r.version.starts_with(version))
+        .ok_or_else(|| {
+            anyhow::anyhow!("no installed version of {id} matching {version}")
+        })?;
+
+    let placed = receipt
+        .placements
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("no placed files in receipt for {id}"))?;
+
+    let target = std::path::Path::new(&placed.destination);
+    shim::register::update(id, target)?;
+
+    println!("shim updated — {id} now resolves to v{}.", receipt.version);
+    Ok(())
+}
+
+/// Parses `id@version` into `(id, version)`. Returns `None` if no `@` is present.
+fn parse_version_spec(spec: &str) -> Option<(&str, &str)> {
+    let at = spec.rfind('@')?;
+    Some((&spec[..at], &spec[at + 1..]))
 }

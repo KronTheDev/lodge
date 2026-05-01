@@ -1,0 +1,7 @@
+{
+  "id": "psexample",
+  "version": "1.0.0",
+  "type": "ps-module",
+  "description": "An example PowerShell module.",
+  "author": "test"
+}

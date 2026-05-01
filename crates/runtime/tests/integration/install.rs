@@ -3,10 +3,14 @@
 /// Each test uses a fixture package from `tests/fixtures/packages/`.
 /// Files are placed into a `tempfile::tempdir()` so nothing touches the real system.
 use std::path::Path;
+use std::sync::Mutex;
 
 use lodge::engine::{attester, executor, manifest, resolver};
 use lodge_shared::manifest::Scope;
 use tempfile::tempdir;
+
+/// Serialise tests that read/write `LOCALAPPDATA` to prevent env-var races.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn fixtures() -> &'static Path {
     // CARGO_MANIFEST_DIR = crates/runtime — step up to workspace root
@@ -32,6 +36,7 @@ fn minimal_manifest_parses() {
 
 #[test]
 fn minimal_resolves_without_error() {
+    let _lock = ENV_LOCK.lock().unwrap();
     let pkg = fixtures().join("minimal");
     let json = std::fs::read_to_string(pkg.join("lodge.json")).unwrap();
     let m = manifest::parse(&json).unwrap();
@@ -46,6 +51,7 @@ fn minimal_resolves_without_error() {
 
 #[test]
 fn minimal_execute_places_files_in_temp() {
+    let _lock = ENV_LOCK.lock().unwrap();
     let pkg = fixtures().join("minimal");
     let json = std::fs::read_to_string(pkg.join("lodge.json")).unwrap();
     let m = manifest::parse(&json).unwrap();
@@ -71,6 +77,8 @@ fn minimal_execute_places_files_in_temp() {
 
 #[test]
 fn minimal_receipt_written_and_verifiable() {
+    let _lock = ENV_LOCK.lock().unwrap();
+
     let pkg = fixtures().join("minimal");
     let json = std::fs::read_to_string(pkg.join("lodge.json")).unwrap();
     let m = manifest::parse(&json).unwrap();
@@ -81,14 +89,18 @@ fn minimal_receipt_written_and_verifiable() {
 
     executor::execute(&redirected, &pkg, &mut |_| {}).unwrap();
 
-    // Override receipt dir to tempdir via env
+    // Override receipt dir to tempdir via env, restore afterwards.
     let receipt_root = tempdir().unwrap();
+    let original_localappdata = std::env::var("LOCALAPPDATA").ok();
     unsafe {
         std::env::set_var("LOCALAPPDATA", receipt_root.path());
     }
     let receipt = attester::write_receipt(&m, &redirected, &Scope::User, vec![], "0.1.0").unwrap();
     unsafe {
-        std::env::remove_var("LOCALAPPDATA");
+        match &original_localappdata {
+            Some(v) => std::env::set_var("LOCALAPPDATA", v),
+            None => std::env::remove_var("LOCALAPPDATA"),
+        }
     }
 
     assert_eq!(receipt.id, "minimal");
@@ -111,6 +123,7 @@ fn cli_full_manifest_parses_all_fields() {
 
 #[test]
 fn cli_full_resolves_multiple_entries() {
+    let _lock = ENV_LOCK.lock().unwrap();
     let pkg = fixtures().join("cli-full");
     let json = std::fs::read_to_string(pkg.join("lodge.json")).unwrap();
     let m = manifest::parse(&json).unwrap();
@@ -127,6 +140,7 @@ fn cli_full_resolves_multiple_entries() {
 
 #[test]
 fn overrides_rename_applied() {
+    let _lock = ENV_LOCK.lock().unwrap();
     let pkg = fixtures().join("with-overrides");
     let json = std::fs::read_to_string(pkg.join("lodge.json")).unwrap();
     let m = manifest::parse(&json).unwrap();
@@ -152,6 +166,7 @@ fn overrides_rename_applied() {
 
 #[test]
 fn overrides_take_priority_over_rules() {
+    let _lock = ENV_LOCK.lock().unwrap();
     let pkg = fixtures().join("with-overrides");
     let json = std::fs::read_to_string(pkg.join("lodge.json")).unwrap();
     let m = manifest::parse(&json).unwrap();
@@ -173,6 +188,109 @@ fn overrides_take_priority_over_rules() {
         dest.contains("with-overrides"),
         "dll destination should contain package id, got: {dest}"
     );
+}
+
+// ── ps-module ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn ps_module_manifest_parses() {
+    let pkg = fixtures().join("ps-module");
+    let json = std::fs::read_to_string(pkg.join("lodge.json")).unwrap();
+    let m = manifest::parse(&json).unwrap();
+    assert_eq!(m.id, "psexample");
+    assert_eq!(m.version, "1.0.0");
+    use lodge_shared::manifest::PackageType;
+    assert_eq!(m.package_type, PackageType::PsModule);
+}
+
+#[test]
+fn ps_module_resolves_psm1_file() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let pkg = fixtures().join("ps-module");
+    let json = std::fs::read_to_string(pkg.join("lodge.json")).unwrap();
+    let m = manifest::parse(&json).unwrap();
+    let plan = resolver::resolve(&pkg, &m, "windows", false).unwrap();
+    // Should resolve the .psm1 file
+    assert!(
+        !plan.entries.is_empty(),
+        "expected at least one placement entry for ps-module"
+    );
+    let has_psm1 = plan
+        .entries
+        .iter()
+        .any(|e| e.source.extension().and_then(|x| x.to_str()) == Some("psm1"));
+    assert!(has_psm1, "expected a .psm1 entry in the plan");
+}
+
+// ── with-hooks ────────────────────────────────────────────────────────────────
+
+#[test]
+fn with_hooks_manifest_parses() {
+    let pkg = fixtures().join("with-hooks");
+    let json = std::fs::read_to_string(pkg.join("lodge.json")).unwrap();
+    let m = manifest::parse(&json).unwrap();
+    assert_eq!(m.id, "hooked");
+    assert!(
+        m.hooks.post_install.is_some(),
+        "expected post_install hook to be set"
+    );
+}
+
+#[test]
+fn with_hooks_resolves_and_collects_hooks() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let pkg = fixtures().join("with-hooks");
+    let json = std::fs::read_to_string(pkg.join("lodge.json")).unwrap();
+    let m = manifest::parse(&json).unwrap();
+    let plan = resolver::resolve(&pkg, &m, "windows", false).unwrap();
+    assert!(
+        !plan.entries.is_empty(),
+        "expected at least one file entry"
+    );
+    // Post-install hook should appear in the hooks order
+    assert!(
+        plan.hooks_order.iter().any(|h| h.contains("post")),
+        "expected post-install in hooks_order, got: {:?}",
+        plan.hooks_order
+    );
+}
+
+// ── service ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn service_manifest_parses_elevation_requirement() {
+    let pkg = fixtures().join("service");
+    let json = std::fs::read_to_string(pkg.join("lodge.json")).unwrap();
+    let m = manifest::parse(&json).unwrap();
+    assert_eq!(m.id, "myservice");
+    assert!(m.requires.elevation, "expected requires.elevation = true");
+    use lodge_shared::manifest::PackageType;
+    assert_eq!(m.package_type, PackageType::Service);
+}
+
+#[test]
+fn service_resolves_with_elevation() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let pkg = fixtures().join("service");
+    let json = std::fs::read_to_string(pkg.join("lodge.json")).unwrap();
+    let m = manifest::parse(&json).unwrap();
+    // Pass elevation=true so the hard requirement is satisfied
+    let plan = resolver::resolve(&pkg, &m, "windows", true).unwrap();
+    assert!(
+        !plan.entries.is_empty(),
+        "expected at least one placement entry for service"
+    );
+    assert!(plan.requires_elevation, "plan should require elevation");
+}
+
+#[test]
+fn service_fails_without_elevation() {
+    let pkg = fixtures().join("service");
+    let json = std::fs::read_to_string(pkg.join("lodge.json")).unwrap();
+    let m = manifest::parse(&json).unwrap();
+    // requires.elevation = true but we pass elevation=false → should hard-fail
+    let result = resolver::resolve(&pkg, &m, "windows", false);
+    assert!(result.is_err(), "expected hard failure without elevation");
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

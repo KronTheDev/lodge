@@ -1,0 +1,9 @@
+{
+  "id": "myservice",
+  "version": "1.0.0",
+  "type": "service",
+  "description": "A background service daemon.",
+  "requires": {
+    "elevation": true
+  }
+}

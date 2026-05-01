@@ -1,0 +1,9 @@
+{
+  "id": "hooked",
+  "version": "1.0.0",
+  "type": "cli-tool",
+  "description": "A CLI tool with lifecycle hooks.",
+  "hooks": {
+    "post_install": "scripts/post_install.ps1"
+  }
+}

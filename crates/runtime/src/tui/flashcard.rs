@@ -32,7 +32,7 @@ pub fn show<B: ratatui::backend::Backend>(
     }
 }
 
-fn render(manifest: &Manifest, plan: &PlacementPlan, frame: &mut Frame) {
+pub(crate) fn render(manifest: &Manifest, plan: &PlacementPlan, frame: &mut Frame) {
     let area = frame.area();
 
     // Centre a fixed-width card.
@@ -208,4 +208,91 @@ fn render(manifest: &Manifest, plan: &PlacementPlan, frame: &mut Frame) {
         .alignment(Alignment::Center),
         rows[15],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lodge_shared::{
+        manifest::{Manifest, PackageType, Prefers, Scope},
+        placement::{PlacementPlan, RegistrationEffects},
+    };
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn test_manifest(id: &str) -> Manifest {
+        Manifest {
+            id: id.to_string(),
+            version: "1.0.0".into(),
+            package_type: PackageType::CliTool,
+            description: Some("A test package.".into()),
+            author: Some("tester".into()),
+            prefers: Prefers {
+                scope: Some(Scope::User),
+                ..Default::default()
+            },
+            requires: Default::default(),
+            naming: Default::default(),
+            overrides: vec![],
+            hooks: Default::default(),
+        }
+    }
+
+    fn empty_plan() -> PlacementPlan {
+        PlacementPlan {
+            entries: vec![],
+            registrations: RegistrationEffects::default(),
+            hooks_order: vec![],
+            requires_elevation: false,
+        }
+    }
+
+    #[test]
+    fn flashcard_renders_without_panic() {
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let manifest = test_manifest("testpkg");
+        let plan = empty_plan();
+        terminal.draw(|f| render(&manifest, &plan, f)).unwrap();
+    }
+
+    #[test]
+    fn flashcard_shows_package_id_and_version() {
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let manifest = test_manifest("mypkg");
+        let plan = empty_plan();
+        terminal.draw(|f| render(&manifest, &plan, f)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let content: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(content.contains("mypkg"), "package id not found in buffer");
+        assert!(content.contains("1.0.0"), "version not found in buffer");
+    }
+
+    #[test]
+    fn flashcard_shows_settle_in_prompt() {
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let manifest = test_manifest("testpkg");
+        let plan = empty_plan();
+        terminal.draw(|f| render(&manifest, &plan, f)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let content: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(content.contains("[I]"), "settle-in prompt not found");
+        assert!(content.contains("[C]"), "leave-it prompt not found");
+    }
+
+    #[test]
+    fn flashcard_no_admin_when_elevation_not_required() {
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let manifest = test_manifest("testpkg");
+        let plan = empty_plan(); // requires_elevation = false
+        terminal.draw(|f| render(&manifest, &plan, f)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let content: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(content.contains("no"), "expected 'no' for needs-admin field");
+    }
 }

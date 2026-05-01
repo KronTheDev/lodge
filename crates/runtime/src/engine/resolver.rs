@@ -119,7 +119,7 @@ pub fn resolve(
         entries,
         registrations,
         hooks_order,
-        requires_elevation: matches!(scope_res.scope, Scope::System),
+        requires_elevation: matches!(scope_res.scope, Scope::System) || manifest.requires.elevation,
     })
 }
 

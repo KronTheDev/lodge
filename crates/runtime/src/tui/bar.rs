@@ -100,13 +100,13 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 /// Routes a command through the brain, with runtime-layer overrides for
-/// commands that need access to the local filesystem (history, list, uninstall, verify).
+/// commands that need filesystem access or shim manipulation.
 fn handle_command(brain: &mut Brain, input: &str) -> String {
-    // Resolve intent first to check the command type
     let intent = lodge_brain::intent::resolve_deterministic(input);
     match intent.command {
         Command::History => format_history(),
         Command::List => format_installed(),
+
         Command::Uninstall => {
             let id = intent.args["id"].as_str().unwrap_or("").trim().to_string();
             if id.is_empty() {
@@ -115,6 +115,7 @@ fn handle_command(brain: &mut Brain, input: &str) -> String {
                 run_uninstall(&id)
             }
         }
+
         Command::Verify => {
             let id = intent.args["id"].as_str().unwrap_or("").trim().to_string();
             if id.is_empty() {
@@ -123,7 +124,89 @@ fn handle_command(brain: &mut Brain, input: &str) -> String {
                 run_verify(&id)
             }
         }
+
+        Command::Info => {
+            let id = intent.args["id"].as_str().unwrap_or("").trim().to_string();
+            if id.is_empty() {
+                "info what? try: info <id>".into()
+            } else {
+                run_info(&id)
+            }
+        }
+
+        Command::Use => {
+            let spec = intent.args["spec"].as_str().unwrap_or("").trim().to_string();
+            if spec.is_empty() {
+                "use what? try: use <id>@<version>".into()
+            } else {
+                run_use(&spec)
+            }
+        }
+
+        Command::UpdateRulesets => {
+            "lodge ships with built-in rulesets for Windows, macOS, and Linux. \
+             community ruleset updates are not yet available — check back in a future release."
+                .into()
+        }
+
         _ => brain.handle(input),
+    }
+}
+
+/// Shows details for an installed package from its most recent receipt.
+fn run_info(id: &str) -> String {
+    let receipts = attester::list_receipts();
+    match receipts.into_iter().find(|r| r.id == id) {
+        None => format!("{id} is not installed."),
+        Some(r) => {
+            let date = if r.installed_at.len() >= 10 {
+                &r.installed_at[..10]
+            } else {
+                &r.installed_at
+            };
+            let mut lines = vec![
+                format!("{}  v{}", r.id, r.version),
+                format!("  installed  {date}"),
+                format!("  scope      {}", r.scope),
+                format!("  files      {}", r.placements.len()),
+            ];
+            for p in &r.placements {
+                let name = std::path::Path::new(&p.destination)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&p.destination);
+                lines.push(format!("    → {name}"));
+            }
+            lines.join("\n")
+        }
+    }
+}
+
+/// Switches the active version shim and returns a plain-language result.
+fn run_use(spec: &str) -> String {
+    let Some(at) = spec.rfind('@') else {
+        return format!("invalid spec — expected id@version, got '{spec}'");
+    };
+    let (id, version) = (&spec[..at], &spec[at + 1..]);
+
+    let receipts = attester::list_receipts();
+    let Some(receipt) = receipts
+        .into_iter()
+        .find(|r| r.id == id && r.version.starts_with(version))
+    else {
+        return format!(
+            "{id} v{version} is not installed. use `list` to see what's installed."
+        );
+    };
+
+    let Some(placed) = receipt.placements.first() else {
+        return format!("no placed files in receipt for {id}.");
+    };
+
+    let target = std::path::Path::new(&placed.destination);
+    match crate::shim::register::update(id, target) {
+        Ok(_) => format!("shim updated — {id} now resolves to v{}.", receipt.version),
+        Err(e) => format!("couldn't update shim: {e}"),
     }
 }
 

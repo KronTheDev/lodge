@@ -12,12 +12,22 @@ pub struct ScopeResolution {
 /// Resolves the effective installation scope from the manifest and runtime context.
 ///
 /// Rules:
+/// - If `requires.elevation = true` and elevation is unavailable → hard fail.
 /// - If the package prefers `user` scope → always `User`, no fallback needed.
 /// - If the package prefers `system` scope and elevation is available → `System`.
 /// - If the package prefers `system` scope and elevation is **not** available:
-///   - If `requires.elevation = true` → hard fail (caller must abort).
-///   - Otherwise → fall back to `User` with `fell_back = true` (caller should warn).
+///   - Fall back to `User` with `fell_back = true` (caller should warn).
+///   - (`requires.elevation` already caught above, so this path is always soft.)
 pub fn infer_scope(manifest: &Manifest, has_elevation: bool) -> anyhow::Result<ScopeResolution> {
+    // Hard requirement: elevation absolutely needed but unavailable.
+    if manifest.requires.elevation && !has_elevation {
+        anyhow::bail!(
+            "{} requires elevation to install, but elevation is unavailable. \
+             try running as admin.",
+            manifest.id
+        )
+    }
+
     let preferred = manifest.prefers.scope.as_ref().unwrap_or(&Scope::User);
 
     match preferred {
@@ -32,13 +42,8 @@ pub fn infer_scope(manifest: &Manifest, has_elevation: bool) -> anyhow::Result<S
                     scope: Scope::System,
                     fell_back: false,
                 })
-            } else if manifest.requires.elevation {
-                anyhow::bail!(
-                    "{} requires system scope with elevation, but elevation is unavailable. \
-                     try running as admin.",
-                    manifest.id
-                )
             } else {
+                // requires.elevation is false here (checked above), so soft fallback is safe.
                 Ok(ScopeResolution {
                     scope: Scope::User,
                     fell_back: true,

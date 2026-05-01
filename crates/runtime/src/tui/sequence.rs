@@ -234,8 +234,8 @@ fn render(id: &str, version: &str, steps: &[Step], done: usize, total: usize, fr
         .collect();
     frame.render_widget(Paragraph::new(step_lines), chunks[3]);
 
-    // Progress gauge
-    let pct = done.checked_div(total).map_or(0, |r| (r * 100) as u16);
+    // Progress gauge — multiply first to preserve precision before integer division.
+    let pct = (done * 100).checked_div(total).unwrap_or(0) as u16;
     let label = format!("  {done} / {total}");
     frame.render_widget(
         Gauge::default()
@@ -279,5 +279,131 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("…{}", &s[s.len().saturating_sub(max.saturating_sub(1))..])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lodge_shared::placement::{PlacementEntry, PlacementPlan, RegistrationEffects};
+    use ratatui::{backend::TestBackend, Terminal};
+    use std::path::PathBuf;
+
+    fn empty_plan() -> PlacementPlan {
+        PlacementPlan {
+            entries: vec![],
+            registrations: RegistrationEffects::default(),
+            hooks_order: vec![],
+            requires_elevation: false,
+        }
+    }
+
+    fn plan_with_entry(dest: &str) -> PlacementPlan {
+        PlacementPlan {
+            entries: vec![PlacementEntry {
+                source: PathBuf::from("bin/tool.exe"),
+                destination: PathBuf::from(dest),
+                rename: None,
+            }],
+            registrations: RegistrationEffects {
+                add_to_path: true,
+                ..Default::default()
+            },
+            hooks_order: vec!["post_install".into()],
+            requires_elevation: false,
+        }
+    }
+
+    #[test]
+    fn steps_for_empty_plan_is_empty() {
+        let plan = empty_plan();
+        assert!(steps_for_plan(&plan).is_empty());
+    }
+
+    #[test]
+    fn steps_for_plan_includes_file_path_and_registration() {
+        let plan = plan_with_entry("C:\\Programs\\tool.exe");
+        let steps = steps_for_plan(&plan);
+        // Order: pre-hooks → entries → registrations → post-hooks
+        // plan has: one entry + PATH + post-install hook = 3 steps
+        assert_eq!(steps.len(), 3, "expected 3 steps, got: {:?}", steps.iter().map(|s| &s.label).collect::<Vec<_>>());
+        let labels: Vec<&str> = steps.iter().map(|s| s.label.as_str()).collect();
+        assert!(labels.contains(&"binary"), "expected binary step");
+        assert!(labels.contains(&"PATH"), "expected PATH step");
+        assert!(labels.contains(&"post-install"), "expected post-install step");
+        // Entry comes before post-install hook
+        let binary_idx = labels.iter().position(|&l| l == "binary").unwrap();
+        let post_idx = labels.iter().position(|&l| l == "post-install").unwrap();
+        assert!(binary_idx < post_idx, "binary entry should precede post-install hook");
+    }
+
+    #[test]
+    fn progress_pct_is_correct_at_midpoint() {
+        // Test the arithmetic directly: 3 of 5 = 60%
+        let done = 3usize;
+        let total = 5usize;
+        let pct = (done * 100).checked_div(total).unwrap_or(0) as u16;
+        assert_eq!(pct, 60);
+    }
+
+    #[test]
+    fn progress_pct_does_not_panic_on_zero_total() {
+        let done = 0usize;
+        let total = 0usize;
+        let pct = (done * 100).checked_div(total).unwrap_or(0) as u16;
+        assert_eq!(pct, 0);
+    }
+
+    #[test]
+    fn sequence_render_does_not_panic() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let steps = vec![
+            Step { label: "binary".into(), detail: "C:\\Programs\\tool.exe".into(), state: StepState::Done },
+            Step { label: "PATH".into(), detail: "shim dir".into(), state: StepState::Pending },
+        ];
+        terminal
+            .draw(|f| render("mytool", "1.0.0", &steps, 1, 2, f))
+            .unwrap();
+    }
+
+    #[test]
+    fn sequence_render_shows_package_id() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let steps = vec![Step {
+            label: "binary".into(),
+            detail: "dest/tool.exe".into(),
+            state: StepState::InProgress,
+        }];
+        terminal
+            .draw(|f| render("mypkg", "2.0.0", &steps, 0, 1, f))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let content: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(content.contains("mypkg"));
+        assert!(content.contains("2.0.0"));
+    }
+
+    #[test]
+    fn file_label_classifies_extensions() {
+        assert_eq!(file_label("tool.exe"), "binary");
+        assert_eq!(file_label("helper.dll"), "library");
+        assert_eq!(file_label("config.json"), "config");
+        assert_eq!(file_label("module.psm1"), "powershell");
+        assert_eq!(file_label("font.ttf"), "font");
+        assert_eq!(file_label("readme.txt"), "file");
+    }
+
+    #[test]
+    fn truncate_short_string_unchanged() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_long_string_adds_ellipsis() {
+        let s = truncate("abcdefghij", 5);
+        assert!(s.starts_with('…'));
+        assert!(s.len() <= 5 + '…'.len_utf8());
     }
 }

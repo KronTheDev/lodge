@@ -95,7 +95,11 @@ fn delete_receipt_for(receipt: &Receipt) -> Result<()> {
 mod tests {
     use super::*;
     use lodge_shared::receipt::{PlacedFile, Receipt};
+    use std::sync::Mutex;
     use tempfile::tempdir;
+
+    // Serialize tests that mutate LOCALAPPDATA to avoid env-var races.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn write_fake_receipt(dir: &std::path::Path, id: &str, dest: &str) -> Receipt {
         let receipt = Receipt {
@@ -120,7 +124,7 @@ mod tests {
 
     #[test]
     fn no_receipt_returns_err() {
-        // Override receipt dir to empty tempdir
+        let _lock = ENV_LOCK.lock().unwrap();
         let tmp = tempdir().unwrap();
         unsafe { std::env::set_var("LOCALAPPDATA", tmp.path()) };
         let result = uninstall("nonexistent-package-xyz");
@@ -130,11 +134,11 @@ mod tests {
 
     #[test]
     fn removes_placed_files() {
+        let _lock = ENV_LOCK.lock().unwrap();
         let tmp = tempdir().unwrap();
         let receipts = tmp.path().join("lodge").join("receipts");
         std::fs::create_dir_all(&receipts).unwrap();
 
-        // Create a real file to be removed
         let file = tmp.path().join("tool.exe");
         std::fs::write(&file, b"binary").unwrap();
 
@@ -149,11 +153,11 @@ mod tests {
 
     #[test]
     fn missing_file_reported_not_fatal() {
+        let _lock = ENV_LOCK.lock().unwrap();
         let tmp = tempdir().unwrap();
         let receipts = tmp.path().join("lodge").join("receipts");
         std::fs::create_dir_all(&receipts).unwrap();
 
-        // Don't create the file — it's "missing"
         let missing = tmp.path().join("missing.exe").to_string_lossy().to_string();
         unsafe { std::env::set_var("LOCALAPPDATA", tmp.path()) };
         write_fake_receipt(&receipts, "missingtool", &missing);
