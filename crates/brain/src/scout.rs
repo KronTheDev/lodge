@@ -109,6 +109,12 @@ pub static PROBES: &[Probe] = &[
         args: &[],
         run: probes::arch,
     },
+    Probe {
+        name: "registry_key",
+        description: "Value of a Windows registry key (HKCU or HKLM)",
+        args: &["hive", "path", "value"],
+        run: probes::registry_key,
+    },
 ];
 
 /// Dispatches a probe by name with the given args.
@@ -490,6 +496,57 @@ mod probes {
             value: Some(std::env::consts::ARCH.to_string()),
             raw: None,
             error: None,
+        }
+    }
+
+    pub fn registry_key(args: &ProbeArgs) -> ProbeResult {
+        let hive = args.get("hive").map(|s| s.as_str()).unwrap_or("HKCU");
+        let path = match args.get("path") {
+            Some(p) => p.clone(),
+            None => return err("registry_key", "path argument required".into()),
+        };
+        let value_name = args.get("value").map(|s| s.as_str()).unwrap_or("");
+
+        #[cfg(windows)]
+        {
+            use std::process::Command;
+            // Use reg.exe to avoid adding winreg as a brain dep
+            let full_key = format!("{}\\{}", hive, path);
+            let output = Command::new("reg")
+                .args(["query", &full_key, "/v", value_name])
+                .output();
+
+            match output {
+                Ok(o) if o.status.success() => {
+                    let raw = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    // Parse: "    ValueName    REG_SZ    ActualValue"
+                    let val = raw
+                        .lines()
+                        .find(|l| l.trim_start().starts_with(value_name))
+                        .and_then(|l| l.splitn(4, char::is_whitespace).last())
+                        .map(|s| s.trim().to_string());
+                    ProbeResult {
+                        probe: "registry_key",
+                        found: val.is_some(),
+                        value: val,
+                        raw: Some(raw),
+                        error: None,
+                    }
+                }
+                _ => not_found("registry_key"),
+            }
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = (hive, path, value_name);
+            ProbeResult {
+                probe: "registry_key",
+                found: false,
+                value: None,
+                raw: None,
+                error: Some("registry keys are only available on Windows".into()),
+            }
         }
     }
 }

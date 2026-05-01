@@ -103,11 +103,15 @@ fn run_install(pkg_path: &Path) -> anyhow::Result<()> {
     let scope = engine::inference::infer_scope(&manifest, false)?.scope;
     engine::attester::write_receipt(&manifest, &plan, &scope, hooks_run, VERSION)?;
 
-    // Register shim if it's a CLI tool
+    // Register shim if it's a CLI tool, and ensure shim dir is on PATH
     use lodge_shared::manifest::PackageType;
     if matches!(manifest.package_type, PackageType::CliTool) {
         if let Some(first_entry) = plan.entries.first() {
             shim::register::register(manifest.command_name(), &first_entry.destination)?;
+        }
+        // Add shim directory to user PATH if not already present
+        if let Err(e) = shim::register::ensure_shim_dir_on_path() {
+            eprintln!("note: couldn't add shim dir to PATH: {e}");
         }
     }
 

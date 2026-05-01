@@ -79,6 +79,116 @@ pub fn update(command_name: &str, new_target: &Path) -> Result<()> {
     register(command_name, new_target)
 }
 
+/// Ensures the shim directory is present in the user's PATH.
+///
+/// On Windows: writes the value to `HKCU\Environment\PATH` via the registry
+/// and broadcasts a `WM_SETTINGCHANGE` so the change takes effect in new shells
+/// without a reboot.
+///
+/// On Unix: appends a shell export line to `~/.profile` if not already present.
+/// No-op if the directory is already on PATH.
+pub fn ensure_shim_dir_on_path() -> Result<()> {
+    let dir = shim_dir();
+    let dir_str = dir.to_string_lossy().to_string();
+
+    // Check if already on PATH
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    if current_path.split(path_separator()).any(|p| p == dir_str) {
+        return Ok(());
+    }
+
+    #[cfg(windows)]
+    {
+        add_to_user_path_windows(&dir_str)
+            .context("couldn't add shim directory to user PATH")?;
+    }
+
+    #[cfg(not(windows))]
+    {
+        add_to_profile_unix(&dir_str)
+            .context("couldn't add shim directory to PATH in ~/.profile")?;
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn add_to_user_path_windows(dir: &str) -> Result<()> {
+    // Read the current user PATH from the registry
+    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    let env = hkcu
+        .open_subkey_with_flags("Environment", winreg::enums::KEY_READ | winreg::enums::KEY_WRITE)
+        .context("couldn't open HKCU\\Environment")?;
+
+    let current: String = env.get_value("PATH").unwrap_or_default();
+
+    if current.split(';').any(|p| p.eq_ignore_ascii_case(dir)) {
+        return Ok(());
+    }
+
+    let new_path = if current.is_empty() {
+        dir.to_string()
+    } else {
+        format!("{};{}", current, dir)
+    };
+
+    env.set_value("PATH", &new_path)
+        .context("couldn't write PATH to registry")?;
+
+    // Notify running shells of the change
+    broadcast_settings_change_windows();
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn broadcast_settings_change_windows() {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    let env: Vec<u16> = OsStr::new("Environment\0").encode_wide().collect();
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::SendMessageTimeoutW(
+            windows_sys::Win32::UI::WindowsAndMessaging::HWND_BROADCAST,
+            windows_sys::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE,
+            0,
+            env.as_ptr() as isize,
+            windows_sys::Win32::UI::WindowsAndMessaging::SMTO_ABORTIFHUNG,
+            1000,
+            std::ptr::null_mut(),
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn add_to_profile_unix(dir: &str) -> Result<()> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let profile = std::path::PathBuf::from(home).join(".profile");
+
+    let marker = format!("# lodge shim path\nexport PATH=\"{dir}:$PATH\"");
+
+    let existing = std::fs::read_to_string(&profile).unwrap_or_default();
+    if existing.contains(dir) {
+        return Ok(());
+    }
+
+    let mut content = existing;
+    if !content.ends_with('\n') && !content.is_empty() {
+        content.push('\n');
+    }
+    content.push('\n');
+    content.push_str(&marker);
+    content.push('\n');
+
+    std::fs::write(&profile, content)
+        .with_context(|| format!("couldn't write to {:?}", profile))?;
+
+    Ok(())
+}
+
+fn path_separator() -> char {
+    if cfg!(windows) { ';' } else { ':' }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

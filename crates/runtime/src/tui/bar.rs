@@ -100,14 +100,58 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 /// Routes a command through the brain, with runtime-layer overrides for
-/// commands that need access to the local filesystem (history, list).
+/// commands that need access to the local filesystem (history, list, uninstall, verify).
 fn handle_command(brain: &mut Brain, input: &str) -> String {
     // Resolve intent first to check the command type
     let intent = lodge_brain::intent::resolve_deterministic(input);
     match intent.command {
         Command::History => format_history(),
         Command::List => format_installed(),
+        Command::Uninstall => {
+            let id = intent.args["id"].as_str().unwrap_or("").trim().to_string();
+            if id.is_empty() {
+                "uninstall what? try: uninstall <id>".into()
+            } else {
+                run_uninstall(&id)
+            }
+        }
+        Command::Verify => {
+            let id = intent.args["id"].as_str().unwrap_or("").trim().to_string();
+            if id.is_empty() {
+                "verify what? try: verify <id>".into()
+            } else {
+                run_verify(&id)
+            }
+        }
         _ => brain.handle(input),
+    }
+}
+
+/// Uninstalls a package and returns a plain-language result.
+fn run_uninstall(id: &str) -> String {
+    match crate::engine::uninstall::uninstall(id) {
+        Ok(result) => {
+            let mut lines = vec![format!("{id} removed.")];
+            if !result.missing_files.is_empty() {
+                lines.push(format!(
+                    "  {} file(s) were already gone.",
+                    result.missing_files.len()
+                ));
+            }
+            if result.shim_removed {
+                lines.push("  shim unregistered.".into());
+            }
+            lines.join("\n")
+        }
+        Err(e) => format!("couldn't uninstall {id}: {e}"),
+    }
+}
+
+/// Verifies an installation and returns a plain-language result.
+fn run_verify(id: &str) -> String {
+    match crate::engine::verify::verify(id) {
+        Ok(result) => crate::engine::verify::format_verify_result(&result),
+        Err(e) => format!("couldn't verify {id}: {e}"),
     }
 }
 
