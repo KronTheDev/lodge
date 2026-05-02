@@ -1,5 +1,6 @@
 use lodge::engine;
 use lodge::shim;
+use lodge::VERSION;
 mod tui;
 
 use std::path::Path;
@@ -10,8 +11,6 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
-
-const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser, Debug)]
 #[command(
@@ -27,15 +26,30 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Install a package from a local path.
+    /// Install a package. Accepts a local path or a feed package id.
     Install {
-        /// Path to the package directory containing a lodge.json manifest.
-        package: String,
+        /// Package id (looked up in the local feed) or path to a package directory.
+        target: String,
     },
-    /// Remove an installed package by id.
+    /// Remove an installed package.
     Uninstall {
         /// Package id to remove.
         id: String,
+    },
+    /// Update a package to the latest version in the local feed.
+    Update {
+        /// Package id to update, or "all" to update every installed package.
+        id: String,
+    },
+    /// Roll back a package to its previous installed version.
+    Rollback {
+        /// Package id to roll back.
+        id: String,
+    },
+    /// Search the local feed for packages matching a query.
+    Search {
+        /// Search query (matches id and description).
+        query: String,
     },
     /// Switch the active version shim for an installed package.
     Use {
@@ -53,12 +67,20 @@ fn main() -> anyhow::Result<()> {
         None | Some(Command::Bar) => {
             tui::bar::run()?;
         }
-        Some(Command::Install { package }) => {
-            let pkg_path = Path::new(&package);
-            run_install(pkg_path)?;
+        Some(Command::Install { target }) => {
+            run_install_target(&target)?;
         }
         Some(Command::Uninstall { id }) => {
             run_uninstall_cli(&id)?;
+        }
+        Some(Command::Update { id }) => {
+            run_update_cli(&id)?;
+        }
+        Some(Command::Rollback { id }) => {
+            run_rollback_cli(&id)?;
+        }
+        Some(Command::Search { query }) => {
+            run_search_cli(&query);
         }
         Some(Command::Use { spec }) => {
             run_use_cli(&spec)?;
@@ -68,7 +90,26 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_install(pkg_path: &Path) -> anyhow::Result<()> {
+/// Installs from a local path or resolves `target` through the feed.
+fn run_install_target(target: &str) -> anyhow::Result<()> {
+    let pkg_path = if looks_like_path(target) {
+        std::path::PathBuf::from(target)
+    } else {
+        // Look up in local feed
+        let entry = engine::feed::find_latest(target).ok_or_else(|| {
+            anyhow::anyhow!(
+                "'{target}' is not a path and was not found in the local feed.\n\
+                 hint: add the package to {} or pass a directory path.",
+                engine::feed::feed_dir().display()
+            )
+        })?;
+        entry.path
+    };
+
+    run_install(&pkg_path)
+}
+
+fn run_install(pkg_path: &std::path::Path) -> anyhow::Result<()> {
     let manifest_path = pkg_path.join("lodge.json");
     let json = std::fs::read_to_string(&manifest_path)
         .map_err(|e| anyhow::anyhow!("couldn't read lodge.json in {:?}: {e}", pkg_path))?;
@@ -92,7 +133,6 @@ fn run_install(pkg_path: &Path) -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Flashcard — confirm or abort
     let confirmed = tui::flashcard::show(&manifest, &plan, &mut terminal)?;
 
     if !confirmed {
@@ -102,7 +142,6 @@ fn run_install(pkg_path: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Sequence — execute and display
     let hooks_run = tui::sequence::run(
         &manifest.id,
         &manifest.version,
@@ -111,21 +150,17 @@ fn run_install(pkg_path: &Path) -> anyhow::Result<()> {
         &mut terminal,
     )?;
 
-    // Restore terminal
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 
-    // Write receipt
     let scope = engine::inference::infer_scope(&manifest, false)?.scope;
     engine::attester::write_receipt(&manifest, &plan, &scope, hooks_run, VERSION)?;
 
-    // Register shim if it's a CLI tool, and ensure shim dir is on PATH
     use lodge_shared::manifest::PackageType;
     if matches!(manifest.package_type, PackageType::CliTool) {
         if let Some(first_entry) = plan.entries.first() {
             shim::register::register(manifest.command_name(), &first_entry.destination)?;
         }
-        // Add shim directory to user PATH if not already present
         if let Err(e) = shim::register::ensure_shim_dir_on_path() {
             eprintln!("note: couldn't add shim dir to PATH: {e}");
         }
@@ -135,10 +170,9 @@ fn run_install(pkg_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Removes an installed package by id.
+/// Removes an installed package.
 fn run_uninstall_cli(id: &str) -> anyhow::Result<()> {
     let result = engine::uninstall::uninstall(id)?;
-
     println!("{id} removed.");
     if !result.missing_files.is_empty() {
         println!("  {} file(s) were already gone.", result.missing_files.len());
@@ -149,9 +183,40 @@ fn run_uninstall_cli(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Updates a package (or all packages) from the local feed.
+fn run_update_cli(id: &str) -> anyhow::Result<()> {
+    if id.eq_ignore_ascii_case("all") {
+        let results = engine::update::update_all(VERSION);
+        if results.is_empty() {
+            println!("no packages installed.");
+        }
+        for (pkg_id, result) in &results {
+            match result {
+                Ok(r) => println!("{}", engine::update::format_update_result(pkg_id, r)),
+                Err(e) => eprintln!("{pkg_id}: {e}"),
+            }
+        }
+    } else {
+        let result = engine::update::update(id, VERSION)?;
+        println!("{}", engine::update::format_update_result(id, &result));
+    }
+    Ok(())
+}
+
+/// Rolls back a package to its previous version.
+fn run_rollback_cli(id: &str) -> anyhow::Result<()> {
+    let result = engine::rollback::rollback(id, VERSION)?;
+    println!("{}", engine::rollback::format_rollback_result(id, &result));
+    Ok(())
+}
+
+/// Searches the local feed and prints matching packages.
+fn run_search_cli(query: &str) {
+    let results = engine::feed::search(query);
+    println!("{}", engine::feed::format_search_results(&results));
+}
+
 /// Switches the active version shim for an installed package.
-///
-/// `spec` must be in the form `id@version` (e.g. `mytool@1.0.0`).
 fn run_use_cli(spec: &str) -> anyhow::Result<()> {
     let (id, version) = parse_version_spec(spec)
         .ok_or_else(|| anyhow::anyhow!("invalid spec '{spec}' — expected id@version"))?;
@@ -160,23 +225,30 @@ fn run_use_cli(spec: &str) -> anyhow::Result<()> {
     let receipt = receipts
         .into_iter()
         .find(|r| r.id == id && r.version.starts_with(version))
-        .ok_or_else(|| {
-            anyhow::anyhow!("no installed version of {id} matching {version}")
-        })?;
+        .ok_or_else(|| anyhow::anyhow!("no installed version of {id} matching {version}"))?;
 
     let placed = receipt
         .placements
         .first()
         .ok_or_else(|| anyhow::anyhow!("no placed files in receipt for {id}"))?;
 
-    let target = std::path::Path::new(&placed.destination);
+    let target = Path::new(&placed.destination);
     shim::register::update(id, target)?;
 
     println!("shim updated — {id} now resolves to v{}.", receipt.version);
     Ok(())
 }
 
-/// Parses `id@version` into `(id, version)`. Returns `None` if no `@` is present.
+/// Returns `true` when `s` looks like a filesystem path rather than a package id.
+fn looks_like_path(s: &str) -> bool {
+    s.starts_with('.')
+        || s.starts_with('/')
+        || s.starts_with('~')
+        || s.contains('\\')
+        || (s.len() >= 3 && s.chars().nth(1) == Some(':'))
+}
+
+/// Parses `id@version` into `(id, version)`. Returns `None` if `@` is absent.
 fn parse_version_spec(spec: &str) -> Option<(&str, &str)> {
     let at = spec.rfind('@')?;
     Some((&spec[..at], &spec[at + 1..]))

@@ -143,6 +143,50 @@ fn handle_command(brain: &mut Brain, input: &str) -> String {
             }
         }
 
+        Command::Search => {
+            let query = intent.args["query"].as_str().unwrap_or("").trim().to_string();
+            if query.is_empty() {
+                run_search_all()
+            } else {
+                run_search(&query)
+            }
+        }
+
+        Command::Update => {
+            let id = intent.args["id"].as_str().unwrap_or("").trim().to_string();
+            if id.is_empty() {
+                "update what? try: update <id> or update all".into()
+            } else {
+                run_update(&id)
+            }
+        }
+
+        Command::UpdateAll => run_update_all(),
+
+        Command::Rollback => {
+            let id = intent.args["id"].as_str().unwrap_or("").trim().to_string();
+            if id.is_empty() {
+                "rollback what? try: rollback <id>".into()
+            } else {
+                run_rollback(&id)
+            }
+        }
+
+        Command::Install => {
+            let target = intent
+                .args
+                .get("target")
+                .and_then(|v| v.as_str())
+                .unwrap_or(input.trim_start_matches("install").trim())
+                .trim()
+                .to_string();
+            if target.is_empty() {
+                "install what? try: install <id> or lodge install <path>".into()
+            } else {
+                run_install_from_feed(&target)
+            }
+        }
+
         Command::UpdateRulesets => {
             "lodge ships with built-in rulesets for Windows, macOS, and Linux. \
              community ruleset updates are not yet available — check back in a future release."
@@ -150,6 +194,71 @@ fn handle_command(brain: &mut Brain, input: &str) -> String {
         }
 
         _ => brain.handle(input),
+    }
+}
+
+/// Lists all packages in the local feed.
+fn run_search_all() -> String {
+    let results = crate::engine::feed::scan();
+    crate::engine::feed::format_search_results(&results)
+}
+
+/// Searches the local feed and formats matching entries.
+fn run_search(query: &str) -> String {
+    let results = crate::engine::feed::search(query);
+    crate::engine::feed::format_search_results(&results)
+}
+
+/// Installs a package from the local feed by id (bar-only: no TUI, engine-only).
+fn run_install_from_feed(target: &str) -> String {
+    // In the bar context we can't spawn a full TUI install — resolve from feed
+    // and report where to find it, or do a silent install for feed packages.
+    match crate::engine::feed::find_latest(target) {
+        None => format!(
+            "'{target}' not found in the local feed. \
+             use `lodge install {target}` from the terminal for path-based installs."
+        ),
+        Some(entry) => {
+            match crate::engine::installer::silent_install(&entry.path, lodge::VERSION) {
+                Ok(receipt) => format!(
+                    "{} v{} settled in.",
+                    receipt.id, receipt.version
+                ),
+                Err(e) => format!("couldn't install {target}: {e}"),
+            }
+        }
+    }
+}
+
+/// Updates a package from the local feed.
+fn run_update(id: &str) -> String {
+    match crate::engine::update::update(id, lodge::VERSION) {
+        Ok(result) => crate::engine::update::format_update_result(id, &result),
+        Err(e) => format!("couldn't update {id}: {e}"),
+    }
+}
+
+/// Updates all installed packages from the local feed.
+fn run_update_all() -> String {
+    let results = crate::engine::update::update_all(lodge::VERSION);
+    if results.is_empty() {
+        return "no packages installed.".into();
+    }
+    results
+        .iter()
+        .map(|(id, result)| match result {
+            Ok(r) => crate::engine::update::format_update_result(id, r),
+            Err(e) => format!("{id}: {e}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Rolls back a package to its previous version.
+fn run_rollback(id: &str) -> String {
+    match crate::engine::rollback::rollback(id, lodge::VERSION) {
+        Ok(result) => crate::engine::rollback::format_rollback_result(id, &result),
+        Err(e) => format!("couldn't roll back {id}: {e}"),
     }
 }
 
