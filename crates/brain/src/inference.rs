@@ -94,6 +94,12 @@ impl InferenceEngine {
                 llama_backend::LlamaBackend, model::params::LlamaModelParams, model::LlamaModel,
             };
 
+            // Suppress llama.cpp's verbose stderr logging so it doesn't
+            // bleed through into the TUI alternate screen.
+            unsafe {
+                llama_cpp_sys_2::llama_log_set(Some(silence_log), std::ptr::null_mut());
+            }
+
             let backend = LlamaBackend::init().context("failed to initialise llama.cpp backend")?;
             let model_params = LlamaModelParams::default();
             let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
@@ -123,7 +129,7 @@ impl InferenceEngine {
             use llama_cpp_2::{
                 context::params::LlamaContextParams,
                 llama_batch::LlamaBatch,
-                model::{AddBos, Special},
+                model::AddBos,
                 sampling::LlamaSampler,
             };
             use std::num::NonZeroU32;
@@ -156,6 +162,8 @@ impl InferenceEngine {
 
             let mut output = String::new();
             let mut n_cur = n_input;
+            // Decoder is stateful across tokens for correct multi-byte UTF-8 handling
+            let mut decoder = encoding_rs::UTF_8.new_decoder();
 
             loop {
                 let token = sampler.sample(&ctx, -1);
@@ -165,7 +173,7 @@ impl InferenceEngine {
                     break;
                 }
 
-                if let Ok(piece) = self.inner.model.token_to_str(token, Special::Tokenize) {
+                if let Ok(piece) = self.inner.model.token_to_piece(token, &mut decoder, true, None) {
                     output.push_str(&piece);
                     // Stop at closing brace — we expect a single JSON object
                     if output.trim_end().ends_with('}') {
@@ -190,6 +198,16 @@ impl InferenceEngine {
             Err(anyhow::anyhow!("model feature not compiled in"))
         }
     }
+}
+
+/// No-op log callback passed to `llama_log_set` to silence llama.cpp's
+/// verbose diagnostic output, which would otherwise corrupt the TUI.
+#[cfg(feature = "model")]
+unsafe extern "C" fn silence_log(
+    _level: llama_cpp_sys_2::ggml_log_level,
+    _text: *const std::ffi::c_char,
+    _user_data: *mut std::ffi::c_void,
+) {
 }
 
 /// Formats a prompt for SmolLM2-Instruct using its chat template.

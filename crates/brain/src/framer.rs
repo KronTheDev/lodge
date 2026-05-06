@@ -158,6 +158,201 @@ pub fn frame_probe_result(probe: &str, result: &ProbeResult) -> String {
             .clone()
             .unwrap_or_else(|| "unknown architecture.".into()),
 
+        "ram_usage" => {
+            if result.found {
+                result
+                    .value
+                    .clone()
+                    .unwrap_or_else(|| "RAM info unavailable.".into())
+            } else {
+                "couldn't read memory usage.".into()
+            }
+        }
+
+        "disk_space_all" => {
+            if result.found {
+                result
+                    .value
+                    .clone()
+                    .unwrap_or_else(|| "disk info unavailable.".into())
+            } else {
+                "couldn't read drive space.".into()
+            }
+        }
+
+        "git_version" => {
+            if result.found {
+                format!("git {}.", result.value.as_deref().unwrap_or("(unknown)"))
+            } else {
+                "git is not installed, or not on PATH.".into()
+            }
+        }
+
+        "java_version" => {
+            if result.found {
+                format!(
+                    "Java {}.",
+                    result.value.as_deref().unwrap_or("(unknown version)")
+                )
+            } else {
+                "Java is not installed, or not on PATH.".into()
+            }
+        }
+
+        "go_version" => {
+            if result.found {
+                format!("Go {}.", result.value.as_deref().unwrap_or("(unknown)"))
+            } else {
+                "Go is not installed, or not on PATH.".into()
+            }
+        }
+
+        "ruby_version" => {
+            if result.found {
+                format!("Ruby {}.", result.value.as_deref().unwrap_or("(unknown)"))
+            } else {
+                "Ruby is not installed, or not on PATH.".into()
+            }
+        }
+
+        "docker_version" => {
+            if result.found {
+                format!(
+                    "Docker {}.",
+                    result.value.as_deref().unwrap_or("(unknown version)")
+                )
+            } else {
+                "Docker is not installed, or the daemon isn't running.".into()
+            }
+        }
+
+        "npm_version" => {
+            if result.found {
+                format!("npm {}.", result.value.as_deref().unwrap_or("(unknown)"))
+            } else {
+                "npm is not installed. install Node.js to get npm.".into()
+            }
+        }
+
+        "php_version" => {
+            if result.found {
+                format!("PHP {}.", result.value.as_deref().unwrap_or("(unknown)"))
+            } else {
+                "PHP is not installed, or not on PATH.".into()
+            }
+        }
+
+        "cpu_info" => result
+            .value
+            .clone()
+            .unwrap_or_else(|| "couldn't read CPU info.".into()),
+
+        "uptime" => {
+            if result.found {
+                format!("up {}.", result.value.as_deref().unwrap_or("unknown"))
+            } else {
+                "couldn't read system uptime.".into()
+            }
+        }
+
+        "hostname" => {
+            if result.found {
+                result
+                    .value
+                    .clone()
+                    .unwrap_or_else(|| "couldn't read hostname.".into())
+            } else {
+                "couldn't read hostname.".into()
+            }
+        }
+
+        "username" => {
+            if result.found {
+                result
+                    .value
+                    .clone()
+                    .unwrap_or_else(|| "couldn't read username.".into())
+            } else {
+                "couldn't determine current user.".into()
+            }
+        }
+
+        "local_ip" => {
+            if result.found {
+                result
+                    .value
+                    .clone()
+                    .unwrap_or_else(|| "couldn't read local IP.".into())
+            } else {
+                "couldn't determine local IP address.".into()
+            }
+        }
+
+        "gpu_info" => {
+            if result.found {
+                result
+                    .value
+                    .clone()
+                    .unwrap_or_else(|| "couldn't read GPU info.".into())
+            } else {
+                "couldn't detect a GPU.".into()
+            }
+        }
+
+        "battery_status" => result
+            .value
+            .clone()
+            .unwrap_or_else(|| "couldn't read battery status.".into()),
+
+        "ssh_key_exists" => {
+            if result.found {
+                format!(
+                    "SSH keys found: {}.",
+                    result.value.as_deref().unwrap_or("(unknown types)")
+                )
+            } else {
+                result
+                    .value
+                    .clone()
+                    .unwrap_or_else(|| "no SSH keys found.".into())
+            }
+        }
+
+        "wsl_version" => result
+            .value
+            .clone()
+            .unwrap_or_else(|| "WSL is not installed.".into()),
+
+        "winget_version" => {
+            if result.found {
+                format!("winget {}.", result.value.as_deref().unwrap_or("(unknown)"))
+            } else {
+                "winget is not installed. it ships with Windows 11 and can be installed from the Microsoft Store.".into()
+            }
+        }
+
+        "scoop_version" => {
+            if result.found {
+                format!("Scoop {}.", result.value.as_deref().unwrap_or("(unknown)"))
+            } else {
+                "Scoop is not installed. see scoop.sh to install it.".into()
+            }
+        }
+
+        "installed_app" => {
+            if result.found {
+                format!(
+                    "installed: {}.",
+                    result.value.as_deref().unwrap_or("(details unavailable)")
+                )
+            } else {
+                result
+                    .value
+                    .clone()
+                    .unwrap_or_else(|| "not found.".into())
+            }
+        }
+
         _ => {
             if let Some(err) = &result.error {
                 format!("probe error: {err}")

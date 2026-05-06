@@ -437,7 +437,7 @@ States: `✔` done, `✖` failed, `◐` in progress, `·` pending, `!` warning
 
 **3. Command bar**
 
-Always-open persistent interface. Single-line input with rich response area.
+Always-open persistent interface. Single-line input with scrolling history.
 
 ```
 ────────────────────────────────────────────────────────
@@ -451,12 +451,26 @@ After input:
 ────────────────────────────────────────────────────────
   > install mytool
 
-  found mytool v1.0.0 on local feed.
-  press enter to see where it would settle.
+  mytool v1.0.0 settled in.
 
 ────────────────────────────────────────────────────────
   > _
 ```
+
+**Input behaviour:**
+- `Enter` — submit command
+- `Backspace` — delete character
+- `↑` / `↓` — navigate command history (per-session, not persisted)
+- `Escape` / `Ctrl+C` — exit
+- Paste — bracketed paste is enabled; multi-line pastes have newlines
+  collapsed to spaces so they land cleanly in the single-line prompt
+
+**Async indicators:**
+- `gathering resources...` → `resolving placement...` — install in progress
+- `probing system...` — a scout probe is running (may invoke PowerShell)
+- `thinking...` — model inference in progress (when model is loaded)
+
+All three run in a background thread; the TUI stays live and responsive.
 
 ### Aesthetic direction
 
@@ -642,19 +656,27 @@ fn frame_error(error: InstallError, context: &PackageContext) -> String {
 
 ### Conversation state
 
-The brain maintains a short rolling context window (last 4 exchanges)
-so follow-up questions work:
+The brain maintains a rolling context window of the last 4 exchanges.
+Every command — whether resolved deterministically or via the model —
+pushes its input and response into the context. This means follow-up
+questions work across all command types:
 
 ```
-> install mytool
-[flashcard shown]
-> what does it touch?        ← "it" resolved from context
-[expanded detail shown]
-> actually cancel that
-[installation aborted]
+> tell me about hello
+  hello  v1.0.0  ...
+
+> what does it install?       ← resolved via model with context
+  ...
+
+> get hello
+  gathering resources...
+  hello v1.0.0 settled in.
 ```
 
-Context is in-memory only. Nothing persists between sessions.
+Context is formatted as ChatML and prepended to the next model prompt.
+It is in-memory only — nothing persists between sessions.
+
+The rolling window caps at 4 exchanges; the oldest is dropped when full.
 
 ---
 
@@ -784,36 +806,101 @@ pub struct ProbeResult {
 
 ### Built-in probes (Windows primary, cross-platform where noted)
 
+**Developer tools**
+
 | Probe | What it queries | Method |
 |-------|----------------|--------|
-| `ps_version` | PowerShell version installed | `$PSVersionTable` via PS invocation |
-| `dotnet_runtimes` | .NET runtime versions present | `dotnet --list-runtimes` |
+| `git_version` | Git version installed | `git --version` |
 | `node_version` | Node.js version | `node --version` |
-| `python_version` | Python version(s) | `python --version`, `python3 --version` |
-| `port_in_use` | Whether a port is bound | TCP bind attempt or `netstat` parse |
-| `service_status` | Whether a named service exists/runs | SCM query (Windows) / systemctl (Linux) |
-| `env_var` | Value of an environment variable | `std::env::var` |
+| `npm_version` | npm version | `npm --version` |
+| `python_version` | Python version | `python --version` / `python3 --version` |
+| `java_version` | Java (JDK/JRE) version | `java -version` (stderr) |
+| `go_version` | Go version | `go version` |
+| `ruby_version` | Ruby version | `ruby --version` |
+| `php_version` | PHP version | `php --version` |
+| `dotnet_runtimes` | .NET runtime versions present | `dotnet --list-runtimes` |
+| `docker_version` | Docker version | `docker --version` |
+| `ps_version` | PowerShell version | `$PSVersionTable` via PS invocation |
 | `execution_policy` | PowerShell execution policy | `Get-ExecutionPolicy` |
-| `disk_space` | Free space on a drive or path | `statvfs` / `GetDiskFreeSpaceEx` |
+
+**System information**
+
+| Probe | What it queries | Method |
+|-------|----------------|--------|
 | `os_build` | OS version and build number | `ver` / `uname -r` / `sw_vers` |
-| `registry_key` | Windows registry key value | `winreg` crate |
-| `process_running` | Whether a named process is active | process list scan |
+| `arch` | CPU architecture | `std::env::consts::ARCH` |
+| `cpu_info` | CPU model, core count, thread count | `Win32_Processor` / `/proc/cpuinfo` |
+| `ram_usage` | Used / total / free RAM | `Win32_ComputerSystem` + `Win32_OperatingSystem` |
+| `gpu_info` | Graphics card model | `Win32_VideoController` / `lspci` |
+| `uptime` | Time since last boot | `Win32_OperatingSystem.LastBootUpTime` / `uptime` |
+| `hostname` | Machine hostname | `%COMPUTERNAME%` / `hostname` |
+| `username` | Current logged-in user | `%USERNAME%` / `$USER` |
+| `local_ip` | Primary local IPv4 address | `Get-NetIPAddress` / `hostname -I` |
+| `battery_status` | Battery charge and state (laptops) | `Win32_Battery` / `/sys/class/power_supply` |
+
+**Storage**
+
+| Probe | What it queries | Method |
+|-------|----------------|--------|
+| `disk_space` | Free space on a specific drive or path | `Get-PSDrive` / `statvfs` |
+| `disk_space_all` | Free space across all drives combined | `Get-PSDrive` (all FS providers) |
+
+**Environment & state**
+
+| Probe | What it queries | Method |
+|-------|----------------|--------|
+| `env_var` | Value of an environment variable | `std::env::var` |
+| `port_in_use` | Whether a TCP port is bound | TCP bind attempt |
+| `process_running` | Whether a named process is active | `tasklist` / `pgrep` |
+| `service_status` | Whether a named service exists/runs | SCM query (Windows) / `systemctl` |
 | `path_exists` | Whether a path exists and its type | `std::fs::metadata` |
 | `path_writable` | Whether a path is writable | probe write attempt |
-| `arch` | CPU architecture | `std::env::consts::ARCH` |
+| `ssh_key_exists` | Whether SSH key pairs exist in `~/.ssh/` | `fs::metadata` on known key filenames |
+
+**Windows-specific**
+
+| Probe | What it queries | Method |
+|-------|----------------|--------|
+| `registry_key` | A Windows registry key value | `reg.exe query` |
+| `wsl_version` | WSL version and installed distributions | `wsl --version` |
+| `winget_version` | winget (Windows Package Manager) version | `winget --version` |
+| `scoop_version` | Scoop package manager version | `scoop --version` |
+
+**Generic catch-all**
+
+| Probe | What it queries | Method |
+|-------|----------------|--------|
+| `installed_app` | Whether a named app is installed (args: `name`) | Registry uninstall keys (Windows) / `which` (Unix) |
 
 ### How the brain selects and runs probes
 
-When the intent resolver returns `{ "command": "explore", ... }`, the brain:
+The intent resolver has two paths for explore classification:
 
-1. Passes the user's input + available probe list to the model
-2. Model returns a structured probe invocation:
-   ```json
-   { "probe": "port_in_use", "args": { "port": 3000 } }
-   ```
+**Fast path — deterministic classifier** (`intent.rs → classify_explore`)
+Most probes are classified without the model by keyword matching on the
+input. This is the primary path — it is instant and works without a model
+file. The classifier is a sequence of `if` guards; ordering matters
+(specific patterns before generic ones).
+
+**Slow path — model** (when a model is loaded)
+If the deterministic classifier returns `Clarify`, the input goes to the
+model, which returns a structured probe invocation:
+```json
+{ "probe": "port_in_use", "args": { "port": 3000 } }
+```
+
+In both cases the execution is the same:
+
+1. Intent resolver returns `{ "command": "explore", "args": { "probe": "...", "probe_args": {...} } }`
+2. Command bar dispatches to a background thread (shows "probing system..." in the input line)
 3. Scout executes the probe → `ProbeResult`
-4. Model receives the result and generates a plain-language response
-5. Response rendered in the command bar
+4. Framer renders a plain-language response from the result
+5. Response appears in the command bar history
+
+Adding a new probe: add an entry to `PROBES` in `scout.rs`, implement the
+function, add a framer arm in `framer.rs`, and add a keyword pattern to
+`classify_explore` in `intent.rs`. The model system prompt is generated
+automatically from the `PROBES` table at startup.
 
 Multi-probe queries (e.g. "is my machine ready to run this package?") trigger
 a **compatibility check** — the manifest's `requires` block is diffed against
@@ -862,71 +949,130 @@ pub struct Probe {
 }
 ```
 
-### Command reference additions
-
-System exploration queries route through the command bar naturally —
-no special syntax required. The intent resolver classifies them:
-
-| Example input | Classified as |
-|--------------|--------------|
-| `do I have node installed?` | `explore → node_version` |
-| `what PS version am I running?` | `explore → ps_version` |
-| `is port 8080 free?` | `explore → port_in_use { port: 8080 }` |
-| `will mytool run on this machine?` | `explore → compatibility_check { package: mytool }` |
-| `is my execution policy going to be a problem?` | `explore → execution_policy` |
-| `how much space do I have on C:?` | `explore → disk_space { path: "C:\\" }` |
-| `is the lodgehelper service running?` | `explore → service_status { name: lodgehelper }` |
-
----
-
 ### System exploration queries
 
 These are not commands with fixed syntax — they are natural language
 questions routed to the scout by the intent resolver. Any phrasing
 that implies a question about the host machine will trigger exploration.
+The response appears after a brief "probing system..." indicator while
+the probe runs in a background thread.
+
+**Developer environment**
 
 | Example input | Probe invoked |
 |--------------|--------------|
+| `do I have git?` | `git_version` |
 | `do I have node installed?` | `node_version` |
+| `what npm version am I on?` | `npm_version` |
+| `is python installed?` | `python_version` |
+| `what java version?` | `java_version` |
+| `is golang installed?` | `go_version` |
+| `do I have ruby?` | `ruby_version` |
+| `is PHP on PATH?` | `php_version` |
+| `what .NET runtimes do I have?` | `dotnet_runtimes` |
+| `is docker running?` | `docker_version` |
 | `what PS version am I on?` | `ps_version` |
-| `is port 8080 free?` | `port_in_use` |
-| `will mytool run on this machine?` | `compatibility_check` |
 | `is my execution policy going to block this?` | `execution_policy` |
-| `how much space on C:?` | `disk_space` |
-| `is lodgehelper running?` | `service_status` |
+
+**System information**
+
+| Example input | Probe invoked |
+|--------------|--------------|
 | `what OS build am I on?` | `os_build` |
+| `what architecture am I running?` | `arch` |
+| `what CPU do I have?` / `how many cores?` | `cpu_info` |
+| `how much RAM am I using?` | `ram_usage` |
+| `what GPU do I have?` | `gpu_info` |
+| `how long has this PC been on?` | `uptime` |
+| `what's my computer name?` | `hostname` |
+| `who am I logged in as?` | `username` |
+| `what's my local IP?` | `local_ip` |
+| `how charged is my battery?` | `battery_status` |
+
+**Storage**
+
+| Example input | Probe invoked |
+|--------------|--------------|
+| `how much space on C:?` | `disk_space { path: "C:\\" }` |
+| `how much free space across all drives?` | `disk_space_all` |
+
+**Environment & state**
+
+| Example input | Probe invoked |
+|--------------|--------------|
+| `what is %APPDATA%?` | `env_var { name: "APPDATA" }` |
+| `is port 8080 free?` | `port_in_use { port: 8080 }` |
+| `is nginx running?` | `process_running { name: "nginx" }` |
+| `is the print spooler running?` | `service_status { name: "spooler" }` |
+| `does C:\Tools exist?` | `path_exists { path: "C:\\Tools" }` |
 | `is AppData writable?` | `path_writable` |
+| `do I have SSH keys?` | `ssh_key_exists` |
+
+**Windows-specific**
+
+| Example input | Probe invoked |
+|--------------|--------------|
+| `is WSL installed?` | `wsl_version` |
+| `do I have winget?` | `winget_version` |
+| `is scoop installed?` | `scoop_version` |
+
+**Compatibility check**
+
+| Example input | Probe invoked |
+|--------------|--------------|
+| `will mytool run on this machine?` | `compatibility_check { package: mytool }` |
+
+**Generic catch-all**
+
+| Example input | Probe invoked |
+|--------------|--------------|
+| `is Chrome installed?` | `installed_app { name: "chrome" }` |
+| `do I have Postman?` | `installed_app { name: "postman" }` |
 
 ### Installation commands
 
 | Input | Canonical | Description |
 |-------|-----------|-------------|
-| `install <id>` | `install` | Install a package |
+| `install <id>` | `install` | Install a package from the local feed |
+| `get <id>` / `grab <id>` / `fetch <id>` | `install` | Natural language aliases |
+| `add <id>` / `set up <id>` / `setup <id>` | `install` | Natural language aliases |
 | `install <id>@<version>` | `install` | Install specific version |
 | `install <path>` | `install` | Install from local path |
 | `uninstall <id>` | `uninstall` | Remove a package |
+| `remove <id>` / `delete <id>` / `drop <id>` | `uninstall` | Natural language aliases |
+| `get rid of <id>` / `take out <id>` | `uninstall` | Natural language aliases |
 | `update <id>` | `update` | Update to latest version |
+| `upgrade <id>` / `refresh <id>` | `update` | Natural language aliases |
 | `update all` | `update-all` | Update all installed packages |
 | `rollback <id>` | `rollback` | Revert to previous version |
+| `revert <id>` / `undo <id>` / `downgrade <id>` | `rollback` | Natural language aliases |
+| `go back <id>` / `previous <id>` | `rollback` | Natural language aliases |
 
 ### Discovery commands
 
 | Input | Canonical | Description |
 |-------|-----------|-------------|
 | `search <query>` | `search` | Search available packages |
-| `list` | `list` | List installed packages |
+| `find <query>` / `look for <query>` | `search` | Natural language aliases |
+| `search` / `browse` | `search` | List all packages in feed |
+| `list` / `ls` | `list` | List installed packages |
+| `what's installed` / `packages` / `installed` | `list` | Natural language aliases |
 | `info <id>` | `info` | Show package details |
-| `what's installed` | `list` | Natural language alias |
+| `about <id>` / `show <id>` / `describe <id>` | `info` | Natural language aliases |
+| `tell me about <id>` / `show me <id>` | `info` | Natural language aliases |
+| `what about <id>` | `info` | Follow-up alias |
+| `history` / `log` | `history` | Show installation history |
 
 ### Runtime commands
 
 | Input | Canonical | Description |
 |-------|-----------|-------------|
 | `verify <id>` | `verify` | Verify installed package integrity |
+| `check <id>` / `validate <id>` | `verify` | Natural language aliases |
 | `update rulesets` | `update-rulesets` | Pull latest community rulesets |
 | `use <id>@<version>` | `use` | Switch active version via shim |
-| `history` | `history` | Show installation history |
-| `help` | `help` | Show help |
+| `switch to <spec>` / `activate <spec>` / `pin <spec>` | `use` | Natural language aliases |
+| `help` / `?` / `commands` | `help` | Show help |
 
 ---
 

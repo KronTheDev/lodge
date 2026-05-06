@@ -19,6 +19,10 @@ pub enum Command {
     History,
     Help,
     Explore,
+    /// Expand the last probe result using the configured AI provider.
+    Expand,
+    /// Run the full probe battery and narrate the result.
+    Scan,
     Clarify,
 }
 
@@ -41,14 +45,6 @@ fn intent(command: Command, args: Value, confidence: f32) -> Intent {
     }
 }
 
-fn clarify(prompt: impl Into<String>) -> Intent {
-    Intent {
-        command: Command::Clarify,
-        args: json!({}),
-        confidence: 0.3,
-        prompt: Some(prompt.into()),
-    }
-}
 
 /// Maps raw user input to a canonical [`Intent`] without a model.
 ///
@@ -61,32 +57,114 @@ pub fn resolve_deterministic(input: &str) -> Intent {
     let words: Vec<&str> = lower.split_whitespace().collect();
 
     match words.as_slice() {
-        ["help"] | ["?"] => intent(Command::Help, json!({}), 1.0),
+        // ── Expand — AI deeper explanation of last probe result ─────────────
+        ["expand"] => resolve_expand(&[]),
+        ["expand", rest @ ..] => resolve_expand(rest),
 
-        ["list"] | ["ls"] => intent(Command::List, json!({}), 1.0),
-        ["what's", "installed"] | ["what", "is", "installed"] | ["installed"] => {
-            intent(Command::List, json!({}), 0.95)
+        // ── Scan — full probe battery ────────────────────────────────────────
+        ["scan"] | ["scan", "system"] | ["scan", "my", "system"]
+        | ["check", "my", "system"] | ["full", "scan"] | ["system", "scan"] => {
+            intent(Command::Scan, json!({}), 1.0)
         }
 
-        ["history"] => intent(Command::History, json!({}), 1.0),
+        // ── Help ────────────────────────────────────────────────────────────
+        ["help"] | ["?"] | ["commands"] | ["what", "can", "you", "do"]
+        | ["what", "can", "i", "do"] => intent(Command::Help, json!({}), 1.0),
 
-        ["install", target, ..] => intent(Command::Install, json!({ "target": target }), 0.95),
+        // ── List ────────────────────────────────────────────────────────────
+        ["list"] | ["ls"] => intent(Command::List, json!({}), 1.0),
+        ["what's", "installed"]
+        | ["what", "is", "installed"]
+        | ["installed"]
+        | ["show", "installed"]
+        | ["what", "do", "i", "have"]
+        | ["what's", "here"]
+        | ["show", "packages"]
+        | ["packages"] => intent(Command::List, json!({}), 0.95),
 
-        ["uninstall", id] | ["remove", id] => intent(Command::Uninstall, json!({ "id": id }), 0.95),
+        // ── History ─────────────────────────────────────────────────────────
+        ["history"] | ["log"] | ["past", "installs"] | ["install", "history"] => {
+            intent(Command::History, json!({}), 1.0)
+        }
 
-        ["update", "all"] => intent(Command::UpdateAll, json!({}), 1.0),
-        ["update", "rulesets"] => intent(Command::UpdateRulesets, json!({}), 1.0),
-        ["update", id] => intent(Command::Update, json!({ "id": id }), 0.95),
+        // ── Uninstall (specific multi-word forms first) ──────────────────────
+        ["get", "rid", "of", id] | ["take", "out", id] => {
+            intent(Command::Uninstall, json!({ "id": id }), 0.95)
+        }
+        ["uninstall", id] | ["remove", id] | ["delete", id] | ["trash", id] | ["drop", id] => {
+            intent(Command::Uninstall, json!({ "id": id }), 0.95)
+        }
 
-        ["rollback", id] => intent(Command::Rollback, json!({ "id": id }), 0.95),
+        // ── Install ─────────────────────────────────────────────────────────
+        // "install" is always explicit — trust it unconditionally.
+        ["install", target, ..] => {
+            intent(Command::Install, json!({ "target": target }), 0.95)
+        }
+        // Synonyms (get, grab, …) only fire when the first argument looks like
+        // a package ID, not a pronoun or article ("get me my OS specs" should
+        // fall through to classify_explore).
+        ["set", "up", target, ..] if looks_like_id(target) => {
+            intent(Command::Install, json!({ "target": target }), 0.95)
+        }
+        ["get", target, ..]
+        | ["grab", target, ..]
+        | ["fetch", target, ..]
+        | ["add", target, ..]
+        | ["setup", target, ..] if looks_like_id(target) => {
+            intent(Command::Install, json!({ "target": target }), 0.95)
+        }
 
-        ["search", query, ..] => intent(Command::Search, json!({ "query": query }), 0.9),
+        // ── Update ───────────────────────────────────────────────────────────
+        ["update", "all"] | ["upgrade", "all"] | ["update", "everything"] => {
+            intent(Command::UpdateAll, json!({}), 1.0)
+        }
+        ["update", "rulesets"] | ["refresh", "rulesets"] => {
+            intent(Command::UpdateRulesets, json!({}), 1.0)
+        }
+        ["update", id] | ["upgrade", id] | ["refresh", id] => {
+            intent(Command::Update, json!({ "id": id }), 0.95)
+        }
 
-        ["info", id] => intent(Command::Info, json!({ "id": id }), 0.95),
+        // ── Rollback ─────────────────────────────────────────────────────────
+        ["go", "back", id] => intent(Command::Rollback, json!({ "id": id }), 0.95),
+        ["rollback", id]
+        | ["revert", id]
+        | ["undo", id]
+        | ["downgrade", id]
+        | ["previous", id] => intent(Command::Rollback, json!({ "id": id }), 0.95),
 
-        ["verify", id] => intent(Command::Verify, json!({ "id": id }), 0.95),
+        // ── Search ───────────────────────────────────────────────────────────
+        ["search"] | ["browse"] => intent(Command::Search, json!({ "query": "" }), 1.0),
+        ["look", "for", query, ..] => intent(Command::Search, json!({ "query": query }), 0.9),
+        ["search", query, ..]
+        | ["find", query, ..]
+        | ["lookup", query, ..] => intent(Command::Search, json!({ "query": query }), 0.9),
 
-        ["use", spec] => intent(Command::Use, json!({ "spec": spec }), 0.9),
+        // ── Info ─────────────────────────────────────────────────────────────
+        ["tell", "me", "about", id] | ["show", "me", id] => {
+            intent(Command::Info, json!({ "id": id }), 0.9)
+        }
+        ["what", "about", id] => intent(Command::Info, json!({ "id": id }), 0.8),
+        ["info", id]
+        | ["about", id]
+        | ["show", id]
+        | ["details", id]
+        | ["what", "is", id]
+        | ["describe", id] => intent(Command::Info, json!({ "id": id }), 0.95),
+
+        // ── Verify ───────────────────────────────────────────────────────────
+        ["verify", id]
+        | ["check", id]
+        | ["validate", id]
+        | ["integrity", id]
+        | ["check", "integrity", id] => intent(Command::Verify, json!({ "id": id }), 0.95),
+
+        // ── Use ──────────────────────────────────────────────────────────────
+        ["use", spec]
+        | ["switch", "to", spec]
+        | ["switch", spec]
+        | ["activate", spec]
+        | ["pin", spec] => intent(Command::Use, json!({ "spec": spec }), 0.9),
 
         _ => classify_explore(&lower),
     }
@@ -119,7 +197,16 @@ pub fn resolve_from_json(json_str: &str, raw_input: &str) -> Intent {
 // ── Explore classification ─────────────────────────────────────────────────
 
 fn classify_explore(input: &str) -> Intent {
-    let words: Vec<&str> = input.split_whitespace().collect();
+    // Strip trailing `?` so "is node installed?" matches "is node installed".
+    let input = input.trim_end_matches('?').trim();
+
+    // Strip leading/trailing punctuation from each token, but preserve `%` and `$`
+    // so env var patterns like `%APPDATA%` and `$HOME` survive intact.
+    let stripped: Vec<String> = input
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '%' && c != '$').to_string())
+        .collect();
+    let words: Vec<&str> = stripped.iter().map(String::as_str).collect();
 
     // Port probe
     if let Some(port) = extract_port(input) {
@@ -156,8 +243,11 @@ fn classify_explore(input: &str) -> Intent {
         );
     }
 
-    // .NET
-    if words.iter().any(|w| ["dotnet", ".net"].contains(w)) {
+    // .NET — ".NET" loses its leading dot after punctuation stripping, so also
+    // match the bare "net" token when the original input contains ".net".
+    if words.contains(&"dotnet")
+        || (input.contains(".net") && words.contains(&"net"))
+    {
         return intent(
             Command::Explore,
             json!({ "probe": "dotnet_runtimes", "probe_args": {} }),
@@ -177,6 +267,83 @@ fn classify_explore(input: &str) -> Intent {
         );
     }
 
+    // Git
+    if words.contains(&"git") {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "git_version", "probe_args": {} }),
+            0.85,
+        );
+    }
+
+    // Java / JDK / JRE
+    if words
+        .iter()
+        .any(|w| ["java", "jdk", "jre", "jvm"].contains(w))
+    {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "java_version", "probe_args": {} }),
+            0.85,
+        );
+    }
+
+    // Go / Golang — "go" alone is too ambiguous; require "golang" or qualifier
+    if words.iter().any(|w| ["golang"].contains(w))
+        || (words.contains(&"go")
+            && words
+                .iter()
+                .any(|w| ["version", "installed", "runtime", "compiler"].contains(w)))
+    {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "go_version", "probe_args": {} }),
+            0.85,
+        );
+    }
+
+    // Ruby / Rails / Gem
+    if words
+        .iter()
+        .any(|w| ["ruby", "rails", "gem", "bundler"].contains(w))
+    {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "ruby_version", "probe_args": {} }),
+            0.85,
+        );
+    }
+
+    // Docker / containers
+    if words
+        .iter()
+        .any(|w| ["docker", "container", "containers", "dockerfile"].contains(w))
+    {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "docker_version", "probe_args": {} }),
+            0.85,
+        );
+    }
+
+    // npm
+    if words.contains(&"npm") {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "npm_version", "probe_args": {} }),
+            0.9,
+        );
+    }
+
+    // PHP
+    if words.contains(&"php") {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "php_version", "probe_args": {} }),
+            0.9,
+        );
+    }
+
     // Execution policy
     if input.contains("execution policy") || input.contains("executionpolicy") {
         return intent(
@@ -186,7 +353,54 @@ fn classify_explore(input: &str) -> Intent {
         );
     }
 
-    // Disk / space / storage
+    // RAM / memory (check before disk to avoid "free" keyword collision)
+    if words
+        .iter()
+        .any(|w| ["ram", "memory", "mem"].contains(w))
+        && !words.iter().any(|w| ["disk", "storage"].contains(w))
+    {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "ram_usage", "probe_args": {} }),
+            0.85,
+        );
+    }
+
+    // Multiple explicit drive letters in one query ("C: and D:", "C:/ and D:/")
+    {
+        let drive_count = input.split_whitespace()
+            .filter(|w| {
+                let s: String = w.chars().filter(|c| c.is_alphanumeric() || *c == ':').collect();
+                s.len() == 2
+                    && s.ends_with(':')
+                    && s.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false)
+            })
+            .count();
+        if drive_count >= 2 {
+            return intent(
+                Command::Explore,
+                json!({ "probe": "disk_space_all", "probe_args": {} }),
+                0.85,
+            );
+        }
+    }
+
+    // Disk / space / storage — all drives
+    if words
+        .iter()
+        .any(|w| ["disk", "space", "free", "storage", "drive", "drives"].contains(w))
+        && words
+            .iter()
+            .any(|w| ["all", "total", "combined", "every"].contains(w))
+    {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "disk_space_all", "probe_args": {} }),
+            0.85,
+        );
+    }
+
+    // Disk / space / storage — single drive
     if words
         .iter()
         .any(|w| ["disk", "space", "free", "storage", "drive"].contains(w))
@@ -199,13 +413,14 @@ fn classify_explore(input: &str) -> Intent {
         );
     }
 
-    // OS / build
+    // OS / build — "get me my OS specs", "what OS am I on", "system specs", etc.
     if words
         .iter()
-        .any(|w| ["os", "build", "winver", "uname", "version"].contains(w))
-        && words
-            .iter()
-            .any(|w| ["os", "build", "windows", "linux", "mac"].contains(w))
+        .any(|w| ["os", "build", "winver", "uname"].contains(w))
+        || (words.iter().any(|w| ["specs", "spec", "specifications"].contains(w))
+            && words.iter().any(|w| ["os", "system", "rig", "pc", "computer", "machine"].contains(w)))
+        || (words.iter().any(|w| ["os", "operating", "system"].contains(w))
+            && words.iter().any(|w| ["version", "build", "am", "my", "running"].contains(w)))
     {
         return intent(
             Command::Explore,
@@ -223,6 +438,141 @@ fn classify_explore(input: &str) -> Intent {
             Command::Explore,
             json!({ "probe": "arch", "probe_args": {} }),
             0.85,
+        );
+    }
+
+    // CPU / processor
+    if words
+        .iter()
+        .any(|w| ["cpu", "processor", "cores", "threads", "chip"].contains(w))
+    {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "cpu_info", "probe_args": {} }),
+            0.85,
+        );
+    }
+
+    // Uptime / last reboot
+    if words
+        .iter()
+        .any(|w| ["uptime", "rebooted", "booted", "restarted", "restart"].contains(w))
+        || (words.contains(&"long")
+            && words.iter().any(|w| ["up", "running", "on"].contains(w)))
+    {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "uptime", "probe_args": {} }),
+            0.85,
+        );
+    }
+
+    // Hostname / computer name
+    if words
+        .iter()
+        .any(|w| ["hostname", "computername"].contains(w))
+        || (words
+            .iter()
+            .any(|w| ["computer", "machine", "pc"].contains(w))
+            && words.iter().any(|w| ["name", "called", "named"].contains(w)))
+    {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "hostname", "probe_args": {} }),
+            0.85,
+        );
+    }
+
+    // Current user / username
+    if words
+        .iter()
+        .any(|w| ["username", "whoami"].contains(w))
+        || (words.contains(&"who") && words.contains(&"i"))
+        || (words.iter().any(|w| ["current", "logged"].contains(w))
+            && words.contains(&"user"))
+    {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "username", "probe_args": {} }),
+            0.85,
+        );
+    }
+
+    // Local IP address
+    if words
+        .iter()
+        .any(|w| ["ip", "ipv4", "address"].contains(w))
+        && !words.iter().any(|w| ["ipv6"].contains(w))
+    {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "local_ip", "probe_args": {} }),
+            0.8,
+        );
+    }
+
+    // GPU / graphics card
+    if words
+        .iter()
+        .any(|w| ["gpu", "graphics", "video"].contains(w))
+    {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "gpu_info", "probe_args": {} }),
+            0.85,
+        );
+    }
+
+    // Battery / charge
+    if words
+        .iter()
+        .any(|w| ["battery", "charge", "charging"].contains(w))
+    {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "battery_status", "probe_args": {} }),
+            0.85,
+        );
+    }
+
+    // SSH keys
+    if words.contains(&"ssh")
+        && words.iter().any(|w| ["key", "keys"].contains(w))
+    {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "ssh_key_exists", "probe_args": {} }),
+            0.85,
+        );
+    }
+
+    // WSL (Windows Subsystem for Linux)
+    if words.contains(&"wsl")
+        || (words.contains(&"linux")
+            && words
+                .iter()
+                .any(|w| ["windows", "subsystem", "wsl"].contains(w)))
+    {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "wsl_version", "probe_args": {} }),
+            0.85,
+        );
+    }
+
+    // Windows package managers
+    if words.contains(&"winget") {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "winget_version", "probe_args": {} }),
+            0.9,
+        );
+    }
+    if words.contains(&"scoop") {
+        return intent(
+            Command::Explore,
+            json!({ "probe": "scoop_version", "probe_args": {} }),
+            0.9,
         );
     }
 
@@ -253,10 +603,18 @@ fn classify_explore(input: &str) -> Intent {
         );
     }
 
-    // Env var
-    if words
-        .iter()
-        .any(|w| ["env", "environment", "variable"].contains(w))
+    // Env var — matches explicit keywords, %VAR%, $VAR, and "what is X" where X
+    // looks like an env var name.
+    if words.iter().any(|w| {
+        ["env", "environment", "variable"].contains(w)
+            || (w.starts_with('%') && w.ends_with('%') && w.len() > 2)
+            || (w.starts_with('$') && w.len() > 1)
+    }) || (words.first() == Some(&"what")
+        && words.get(1) == Some(&"is")
+        && words.get(2).map(|w| {
+            (w.starts_with('%') && w.ends_with('%'))
+                || w.chars().all(|c| c.is_uppercase() || c == '_')
+        }).unwrap_or(false))
     {
         let name = extract_env_var_name(input);
         return intent(
@@ -280,7 +638,57 @@ fn classify_explore(input: &str) -> Intent {
         }
     }
 
-    clarify("what would you like to know?")
+    // Generic "is X installed?" — catch-all for named apps not covered by specific probes.
+    // Confidence is intentionally low (0.65) to avoid false positives.
+    if words
+        .iter()
+        .any(|w| ["installed", "available", "present"].contains(w))
+    {
+        let stop: &[&str] = &[
+            "i", "a", "the", "is", "do", "have", "got", "any", "installed", "available",
+            "present", "on", "my", "this", "machine", "computer", "it", "yet", "already",
+            "system", "here",
+        ];
+        if let Some(name) = words.iter().find(|&&w| !stop.contains(&w)) {
+            return intent(
+                Command::Explore,
+                json!({ "probe": "installed_app", "probe_args": { "name": name } }),
+                0.65,
+            );
+        }
+    }
+
+    // No specific probe matched — return Explore with an empty probe name so
+    // the brain's `run_probe` path can run `suggest_for_explore` on the raw
+    // input and return keyword-scored suggestions instead of a dead end.
+    intent(Command::Explore, json!({ "probe": "" }), 0.3)
+}
+
+/// Returns the `Expand` intent, with an optional follow-up question.
+pub fn resolve_expand(words: &[&str]) -> Intent {
+    let question: Option<String> = if words.is_empty() {
+        None
+    } else {
+        Some(words.join(" "))
+    };
+    intent(Command::Expand, json!({ "question": question }), 1.0)
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+/// Returns `true` if the word looks like a package identifier (not a common
+/// English pronoun, article, or preposition that would indicate natural language).
+fn looks_like_id(word: &str) -> bool {
+    const NOT_ID: &[&str] = &[
+        "me", "my", "your", "their", "our", "its", "his", "her",
+        "the", "a", "an", "some", "any", "all",
+        "this", "that", "these", "those",
+        "what", "which", "how", "why", "when", "where", "who", "whom",
+        "i", "you", "he", "she", "we", "they",
+        "is", "are", "was", "were", "be", "been", "being",
+        "have", "has", "had", "do", "does", "did",
+    ];
+    !word.is_empty() && !NOT_ID.contains(&word)
 }
 
 // ── Extraction helpers ─────────────────────────────────────────────────────

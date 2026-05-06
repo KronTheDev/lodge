@@ -63,6 +63,13 @@ enum Command {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // TUI commands need a real Windows console. When running from Git Bash or
+    // any pseudo-terminal, relaunch in Windows Terminal (or cmd) and exit here.
+    let needs_tui = matches!(cli.command, None | Some(Command::Bar) | Some(Command::Install { .. }));
+    if needs_tui && !tui::console::ensure_console_or_relaunch() {
+        return Ok(());
+    }
+
     match cli.command {
         None | Some(Command::Bar) => {
             tui::bar::run()?;

@@ -1,4 +1,4 @@
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin},
     style::{Style, Stylize},
@@ -23,6 +23,9 @@ pub fn show<B: ratatui::backend::Backend>(
         terminal.draw(|f| render(manifest, plan, f))?;
 
         if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
             match key.code {
                 KeyCode::Char('i') | KeyCode::Char('I') | KeyCode::Enter => return Ok(true),
                 KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => return Ok(false),
@@ -120,12 +123,10 @@ pub(crate) fn render(manifest: &Manifest, plan: &PlacementPlan, frame: &mut Fram
         rows[1],
     );
 
-    // Row 3: description
+    // Row 3: description — truncated to card width
+    let desc_str = fit(manifest.description.as_deref().unwrap_or(""), inner.width as usize);
     frame.render_widget(
-        Paragraph::new(Span::styled(
-            manifest.description.as_deref().unwrap_or(""),
-            Style::default().fg(palette::TEXT_DIM),
-        )),
+        Paragraph::new(Span::styled(desc_str, Style::default().fg(palette::TEXT_DIM))),
         rows[3],
     );
 
@@ -148,8 +149,10 @@ pub(crate) fn render(manifest: &Manifest, plan: &PlacementPlan, frame: &mut Fram
         lodge_shared::manifest::Scope::System => "all users",
     };
 
-    // Derive primary install location from first plan entry
-    let location = plan
+    // Derive primary install location from first plan entry.
+    // Shorten well-known Windows base paths to their env-var equivalents so the
+    // path fits on one line even on machines with long usernames.
+    let location_raw = plan
         .entries
         .first()
         .map(|e| {
@@ -160,6 +163,7 @@ pub(crate) fn render(manifest: &Manifest, plan: &PlacementPlan, frame: &mut Fram
                 .into_owned()
         })
         .unwrap_or_else(|| "—".into());
+    let location = shorten_path(&location_raw);
 
     let hooks_label =
         if manifest.hooks.pre_install.is_some() && manifest.hooks.post_install.is_some() {
@@ -172,15 +176,15 @@ pub(crate) fn render(manifest: &Manifest, plan: &PlacementPlan, frame: &mut Fram
             "none"
         };
 
-    let meta = [
-        ("installs as", command_name.as_str()),
-        ("scope", scope_label),
-        ("location", &location),
-        (
-            "needs admin",
-            if plan.requires_elevation { "yes" } else { "no" },
-        ),
-        ("hooks", hooks_label),
+    // Label column is 14 chars; value gets the remainder.
+    let val_w = (inner.width as usize).saturating_sub(14);
+
+    let meta: [(&str, String); 5] = [
+        ("installs as", fit(&command_name,                                  val_w)),
+        ("scope",       scope_label.to_string()                                   ),
+        ("location",    fit(&location,                                      val_w)),
+        ("needs admin", if plan.requires_elevation { "yes" } else { "no" }.to_string()),
+        ("hooks",       fit(hooks_label,                                    val_w)),
     ];
 
     for (i, (label, value)) in meta.iter().enumerate() {
@@ -188,7 +192,7 @@ pub(crate) fn render(manifest: &Manifest, plan: &PlacementPlan, frame: &mut Fram
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(format!("{label:<14}"), label_style),
-                Span::styled(*value, value_style),
+                Span::styled(value.clone(), value_style),
             ])),
             row,
         );
@@ -208,6 +212,41 @@ pub(crate) fn render(manifest: &Manifest, plan: &PlacementPlan, frame: &mut Fram
         .alignment(Alignment::Center),
         rows[15],
     );
+}
+
+/// Truncate `s` to at most `max` display characters, appending `…` if cut.
+fn fit(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        s.to_string()
+    } else if max == 0 {
+        String::new()
+    } else {
+        let cut: String = chars[..max.saturating_sub(1)].iter().collect();
+        format!("{cut}…")
+    }
+}
+
+/// Replace long well-known path prefixes with their env-var equivalents.
+///
+/// `%LOCALAPPDATA%\Programs\mytool` is far more readable than
+/// `C:\Users\andrew\AppData\Local\Programs\mytool` in the narrow flashcard.
+fn shorten_path(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        for (var, label) in &[
+            ("LOCALAPPDATA", "%LOCALAPPDATA%"),
+            ("APPDATA",      "%APPDATA%"),
+            ("USERPROFILE",  "~"),
+        ] {
+            if let Ok(val) = std::env::var(var) {
+                if !val.is_empty() && path.starts_with(&val) {
+                    return format!("{label}{}", &path[val.len()..]);
+                }
+            }
+        }
+    }
+    path.to_string()
 }
 
 #[cfg(test)]

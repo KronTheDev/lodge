@@ -32,14 +32,22 @@ pub fn rollback(id: &str, runtime_version: &str) -> Result<RollbackResult> {
     if receipts.is_empty() {
         anyhow::bail!("{id} is not installed.");
     }
-    if receipts.len() < 2 {
-        anyhow::bail!(
-            "no previous version of {id} to roll back to — only one install record found."
-        );
-    }
 
     let current_version = receipts[0].version.clone();
-    let previous_version = receipts[1].version.clone();
+
+    // Find the most recent receipt that has a *different* version — skipping
+    // duplicate receipts from reinstalling the same version.
+    let previous_version = receipts
+        .iter()
+        .skip(1)
+        .find(|r| r.version != current_version)
+        .map(|r| r.version.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no previous version of {id} to roll back to — \
+                 only records for v{current_version} exist."
+            )
+        })?;
 
     // The previous version must be in the feed to reinstall from it.
     let entry = feed::find_version(id, &previous_version).ok_or_else(|| {

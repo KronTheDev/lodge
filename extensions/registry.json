@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "description": "Lodge extension registry. To contribute, open a PR adding your entry to this file. The payload_url field is optional — omit it if the payload ships with Lodge itself.",
+  "extensions": [
+    {
+      "id": "lodger",
+      "name": "Lodger",
+      "version": "0.1.0-preview",
+      "description": "desktop companion · pixel-art mascot · optional TTS",
+      "status": "preview",
+      "payload": "lodger-0.1.0-preview.zip",
+      "payload_url": null
+    }
+  ]
+}

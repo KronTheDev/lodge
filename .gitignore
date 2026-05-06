@@ -28,3 +28,6 @@ study/
 
 # Bundled model file (large binary, distributed separately)
 model/*.gguf
+
+# Extension payloads (large binaries, distributed separately — manifests are committed)
+extensions/*.zip

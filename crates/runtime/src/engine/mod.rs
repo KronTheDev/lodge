@@ -1,12 +1,14 @@
 pub mod attester;
 pub mod executor;
 pub mod expander;
+pub mod extensions;
 pub mod feed;
 pub mod inference;
 pub mod installer;
 pub mod manifest;
 pub mod resolver;
 pub mod rollback;
+pub mod scoop;
 pub mod uninstall;
 pub mod update;
 pub mod verify;
