@@ -31,3 +31,9 @@ model/*.gguf
 
 # Extension payloads (large binaries, distributed separately — manifests are committed)
 extensions/*.zip
+
+# Runtime data written during local dev runs (receipts, cache)
+crates/runtime/lodge/
+
+# Claude Code internal worktree scratch space
+.claude/worktrees/
