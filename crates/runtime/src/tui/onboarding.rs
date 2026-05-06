@@ -53,7 +53,9 @@ struct ExtManifest {
 #[derive(Debug, Clone)]
 struct ExtEntry {
     manifest: ExtManifest,
-    /// payload zip is present on disk
+    /// payload zip is already present on disk (ships with Lodge)
+    local_ready: bool,
+    /// payload is obtainable: either local_ready or a download URL exists
     available: bool,
     /// user may toggle (false for coming-soon)
     selectable: bool,
@@ -93,17 +95,18 @@ fn load_local_extensions() -> Vec<ExtEntry> {
             continue;
         }
 
-        let available = manifest
+        let local_ready = manifest
             .payload
             .as_ref()
             .map(|p| dir.join(p).exists())
             .unwrap_or(false);
+        let available = local_ready;
 
         let selectable = manifest.status != "coming-soon";
         // Auto-select stable or preview if the payload is present
         let selected = selectable && available;
 
-        entries.push(ExtEntry { manifest, available, selectable, selected });
+        entries.push(ExtEntry { manifest, local_ready, available, selectable, selected });
     }
 
     // Sort: stable first, preview second, coming-soon last
@@ -121,9 +124,15 @@ fn load_extensions_from_registry(entries: &[crate::engine::extensions::RegistryE
     let mut result: Vec<ExtEntry> = Vec::new();
 
     for reg in entries {
-        let available = reg.payload.as_ref()
+        // Available if the payload zip is already on disk (ships with Lodge)
+        // OR if a remote payload_url is present (can be downloaded).
+        let local_ready = reg.payload.as_ref()
             .map(|p| dir.join(p).exists())
             .unwrap_or(false);
+        let downloadable = reg.payload_url.as_deref()
+            .map(|u| !u.is_empty())
+            .unwrap_or(false);
+        let available = local_ready || downloadable;
         let selectable = reg.status != "coming-soon";
         let selected = selectable && available;
 
@@ -136,6 +145,7 @@ fn load_extensions_from_registry(entries: &[crate::engine::extensions::RegistryE
                 status: reg.status.clone(),
                 payload: reg.payload.clone(),
             },
+            local_ready,
             available,
             selectable,
             selected,
@@ -678,14 +688,15 @@ fn render_extensions(state: &State, area: Rect, frame: &mut Frame) {
             let cursor = if i == state.ext_cursor { "▶" } else { " " };
             let check = if entry.selected { "✓" } else { " " };
 
-            // Status badge colour
-            let badge_style = match entry.manifest.status.as_str() {
-                "stable"       => Style::default().fg(palette::SUCCESS),
-                "preview"      => Style::default().fg(palette::WARNING),
-                _              => Style::default().fg(palette::TEXT_DIM),
+            // Status badge: label + colour
+            let (badge_label, badge_style) = match entry.manifest.status.as_str() {
+                "stable"       => (entry.manifest.version.as_str(), Style::default().fg(palette::SUCCESS)),
+                "preview"      => (entry.manifest.version.as_str(), Style::default().fg(palette::WARNING)),
+                "coming-soon"  => ("coming soon",                   Style::default().fg(palette::TEXT_DIM)),
+                _              => (entry.manifest.version.as_str(), Style::default().fg(palette::TEXT_DIM)),
             };
 
-            // First line: cursor + checkbox + name + version
+            // First line: cursor + checkbox + name + badge
             let check_style = if entry.selectable {
                 Style::default().fg(palette::ACCENT)
             } else {
@@ -703,7 +714,7 @@ fn render_extensions(state: &State, area: Rect, frame: &mut Frame) {
                 Span::styled(format!("[{check}] "), check_style),
                 Span::styled(entry.manifest.name.clone(), name_style),
                 Span::raw("  "),
-                Span::styled(entry.manifest.version.clone(), badge_style),
+                Span::styled(badge_label.to_string(), badge_style),
             ]));
 
             // Second line: description
@@ -717,11 +728,14 @@ fn render_extensions(state: &State, area: Rect, frame: &mut Frame) {
                 desc_style,
             )));
 
-            // Third line: availability note
+            // Third line: availability note (three states)
             let avail_text = if entry.manifest.status == "coming-soon" {
                 "       · not yet available".to_string()
-            } else if entry.available {
+            } else if entry.local_ready {
                 "       · payload ready".to_string()
+            } else if entry.available {
+                // available via payload_url but not yet downloaded
+                "       · available for download".to_string()
             } else {
                 "       · payload not found — selection noted for when it ships".to_string()
             };

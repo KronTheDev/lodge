@@ -9,7 +9,8 @@
       "description": "desktop companion · pixel-art mascot · optional TTS",
       "status": "preview",
       "payload": "lodger-0.1.0-preview.zip",
-      "payload_url": null
+      "payload_url": null,
+      "sha256": null
     }
   ]
 }
