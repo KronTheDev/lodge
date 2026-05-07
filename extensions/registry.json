@@ -18,6 +18,7 @@
       "version": "0.1.0",
       "description": "suggestion-based file system cleanup · confidence-tiered · non-destructive staging",
       "status": "stable",
+      "alias": "clean",
       "payload": null,
       "payload_url": "https://github.com/KronTheDev/lodge/releases/download/extensions-v0.1.0/clean-cabin-0.1.0.zip",
       "sha256": "2aba0d2a643cd886ba549a40bf4d85f29907497ecb3a1391d547f2a538e6e184"

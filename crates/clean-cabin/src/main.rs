@@ -39,11 +39,35 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Strip Lodge-injected control flags before subcommand dispatch.
+    let lodge_launched = raw_args.iter().any(|a| a == "--lodge");
+    let lodge_path: Option<PathBuf> = {
+        let mut p = None;
+        let mut iter = raw_args.iter();
+        while let Some(a) = iter.next() {
+            if a == "--path" {
+                p = iter.next().map(PathBuf::from);
+                break;
+            }
+        }
+        p
+    };
+    let args: Vec<String> = {
+        let mut out = Vec::new();
+        let mut iter = raw_args.iter();
+        while let Some(a) = iter.next() {
+            if a == "--lodge" { continue; }
+            if a == "--path" { iter.next(); continue; } // skip value too
+            out.push(a.clone());
+        }
+        out
+    };
 
     match args.as_slice() {
         [] | [_] if args.first().map(|a| a == "clean").unwrap_or(true) => {
-            cmd_scan()
+            cmd_scan(lodge_path, lodge_launched)
         }
         [sub] if sub == "recover" => cmd_recover(false),
         [sub, flag] if sub == "recover" && flag == "--all" => cmd_recover(true),
@@ -72,15 +96,24 @@ fn run() -> Result<()> {
 // ── Subcommands ───────────────────────────────────────────────────────────────
 
 /// Full scan → interactive report → staging flow.
-fn cmd_scan() -> Result<()> {
+fn cmd_scan(scan_path: Option<PathBuf>, _lodge_launched: bool) -> Result<()> {
     let config = Config::load();
 
-    // Prompt for directory to scan.
-    let dirs = prompt_directories()?;
-    if dirs.is_empty() {
-        println!("nothing to scan.");
-        return Ok(());
-    }
+    // Use Lodge-provided path, or prompt the user interactively.
+    let dirs = if let Some(p) = scan_path {
+        if p.exists() {
+            vec![p]
+        } else {
+            anyhow::bail!("path does not exist: {}", p.display());
+        }
+    } else {
+        let d = prompt_directories()?;
+        if d.is_empty() {
+            println!("nothing to scan.");
+            return Ok(());
+        }
+        d
+    };
 
     // Auto-purge old sessions silently.
     staging::auto_purge(config.retention_days);

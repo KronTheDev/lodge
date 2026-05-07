@@ -43,6 +43,10 @@ pub struct RegistryEntry {
     pub description: String,
     /// "stable" | "preview" | "coming-soon"
     pub status: String,
+    /// Short command alias used in the Lodge command bar (e.g. "clean" for "clean-cabin").
+    /// If absent, the `id` is used as the command alias.
+    #[serde(default)]
+    pub alias: Option<String>,
     /// Local payload filename (zip), if the payload ships alongside the binary.
     #[serde(default)]
     pub payload: Option<String>,
@@ -54,6 +58,13 @@ pub struct RegistryEntry {
     /// digest does not match exactly.
     #[serde(default)]
     pub sha256: Option<String>,
+}
+
+impl RegistryEntry {
+    /// Returns the command alias — the short name the user types after `!`.
+    pub fn command_alias(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.id)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

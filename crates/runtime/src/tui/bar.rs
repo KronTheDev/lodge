@@ -467,6 +467,16 @@ pub fn run() -> anyhow::Result<()> {
     // The cached result is used by the next onboarding or extension command.
     std::thread::spawn(|| { let _ = crate::engine::extensions::fetch_registry(); });
 
+    // Build extension alias list from cached registry for autocomplete.
+    // Uses whatever is in the local cache right now; updated next session.
+    let ext_ids: Vec<String> = {
+        let (entries, _) = crate::engine::extensions::fetch_registry();
+        entries.into_iter()
+            .filter(|e| e.status != "coming-soon")
+            .map(|e| e.command_alias().to_string())
+            .collect()
+    };
+
     // Drain any key events that arrived before raw mode was fully active,
     // so they don't accidentally trigger the first screen.
     while event::poll(std::time::Duration::ZERO)? {
@@ -603,6 +613,7 @@ pub fn run() -> anyhow::Result<()> {
                 split_mode, &split_cmd, &split_args, split_cursor,
                 hover_suggestion.as_deref(),
                 &runspaces,
+                &ext_ids,
                 f,
             );
             if let Some(page) = help_page {
@@ -782,7 +793,7 @@ pub fn run() -> anyhow::Result<()> {
                             let len = input.chars().count();
                             if cursor < len {
                                 cursor += 1;
-                            } else if let Some(ghost) = ghost_completion(&input) {
+                            } else if let Some(ghost) = ghost_completion(&input, &ext_ids) {
                                 // Right at end of input fills in the ghost completion.
                                 input.push_str(&ghost);
                                 cursor = input.chars().count();
@@ -1007,19 +1018,48 @@ pub fn run() -> anyhow::Result<()> {
                                 continue;
                             }
 
-                            // ── Clean Cabin extension ────────────────────────────────────
-                            if trimmed == "clean" || trimmed.starts_with("clean ") {
-                                let args: Vec<String> = trimmed
-                                    .trim_start_matches("clean")
-                                    .split_whitespace()
-                                    .map(str::to_string)
-                                    .collect();
-                                match launch_extension("clean-cabin", &args, &mut terminal) {
-                                    Ok(()) => {}
+                            // ── Dynamic extension dispatch ───────────────────────────────
+                            let ext_match: Option<crate::engine::extensions::RegistryEntry> = {
+                                let (entries, _) = crate::engine::extensions::fetch_registry();
+                                let first_word = trimmed.split_whitespace().next().unwrap_or(&trimmed);
+                                entries.into_iter().find(|e| e.command_alias() == first_word)
+                            };
+
+                            if let Some(ref ext_entry) = ext_match {
+                                let alias = ext_entry.command_alias().to_string();
+                                // User-supplied path after the alias (e.g. `!clean ~/Downloads`).
+                                let user_path = trimmed.trim_start_matches(&*alias).trim().to_string();
+                                match show_extension_card(ext_entry, &mut terminal) {
+                                    Ok(true) => {
+                                        history.push((trimmed.clone(), format!("stepping into {}...", ext_entry.name)));
+                                        // Prefer user-supplied path, then home dir.
+                                        // Never pass CWD — it's usually the Lodge source tree.
+                                        let scan_path: String = if !user_path.is_empty() {
+                                            user_path.clone()
+                                        } else {
+                                            #[cfg(windows)]
+                                            { std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string()) }
+                                            #[cfg(not(windows))]
+                                            { std::env::var("HOME").unwrap_or_else(|_| ".".to_string()) }
+                                        };
+                                        match launch_extension(&ext_entry.id, &scan_path, &mut terminal) {
+                                            Ok(()) => {
+                                                history.push((String::new(), format!("{} — done.", ext_entry.name)));
+                                            }
+                                            Err(e) => {
+                                                history.push((String::new(), format!("couldn't launch {} — {e}", ext_entry.name)));
+                                            }
+                                        }
+                                    }
+                                    Ok(false) => {
+                                        history.push((trimmed.clone(), "stayed here.".into()));
+                                    }
                                     Err(e) => {
-                                        history.push((trimmed, format!("couldn't launch clean cabin — {e}")));
+                                        history.push((trimmed.clone(), format!("extension error — {e}")));
                                     }
                                 }
+                                input.clear();
+                                cursor = 0;
                                 continue;
                             }
 
@@ -1059,6 +1099,7 @@ pub fn run() -> anyhow::Result<()> {
                                                 split_mode, &split_cmd, &split_args, split_cursor,
                                                 hs_anim.as_deref(),
                                                 &runspaces,
+                                                &ext_ids,
                                                 f,
                                             );
                                         })?;
@@ -1086,6 +1127,7 @@ pub fn run() -> anyhow::Result<()> {
                                                     split_mode, &split_cmd, &split_args, split_cursor,
                                                     hs_scoop.as_deref(),
                                                     &runspaces,
+                                                    &ext_ids,
                                                     f,
                                                 );
                                             })?;
@@ -1215,7 +1257,7 @@ pub fn run() -> anyhow::Result<()> {
                                 });
                             } else {
                                 let mut b = brain.lock().unwrap();
-                                let response = handle_command(&mut b, &trimmed);
+                                let response = handle_command(&mut b, &trimmed, &ext_ids);
                                 // Push to conversation context so follow-up questions can
                                 // reference what was just asked and answered.
                                 b.context.push(trimmed.clone(), response.clone());
@@ -1307,10 +1349,23 @@ pub fn run() -> anyhow::Result<()> {
 
 /// Routes a command through the brain, with runtime-layer overrides for
 /// commands that need filesystem access or shim manipulation.
-fn handle_command(brain: &mut Brain, input: &str) -> String {
+fn handle_command(brain: &mut Brain, input: &str, ext_ids: &[String]) -> String {
     let intent = lodge_brain::intent::resolve_deterministic(input);
     match intent.command {
-        Command::Help => lodge_brain::framer::HELP.to_string(),
+        Command::Help => {
+            let mut help = lodge_brain::framer::HELP.to_string();
+            if !ext_ids.is_empty() {
+                help.push_str("\n\nextensions:");
+                for id in ext_ids {
+                    help.push_str(&format!("\n  !{id:<18}  run the {id} extension"));
+                }
+            }
+            help.push_str("\n\nbuilt-in tools:");
+            help.push_str("\n  !ollama             manage local Ollama models");
+            help.push_str("\n  !scan               full system probe battery");
+            help.push_str("\n  !register <path>    probe a directory");
+            help
+        }
 
         Command::History => format_history(),
         Command::List => format_installed(),
@@ -1624,6 +1679,7 @@ fn render_bar(
     split_cursor:     usize,
     hover_suggestion: Option<&str>,
     runspaces:        &[Runspace],
+    ext_ids:          &[String],
     frame:            &mut ratatui::Frame,
 ) {
     let area = frame.area();
@@ -1853,7 +1909,7 @@ fn render_bar(
             };
             // Ghost autocomplete when cursor is at the end and typing a ! command.
             let ghost = if cursor == input.chars().count() {
-                ghost_completion(input)
+                ghost_completion(input, ext_ids)
             } else {
                 None
             };
@@ -2062,17 +2118,23 @@ fn classify_kind(cmd: &str) -> CmdKind {
 ///
 /// When the user has typed `!<partial>` with no space, and exactly one known
 /// command starts with `<partial>`, returns the remaining characters.
-fn ghost_completion(input: &str) -> Option<String> {
+/// Extension IDs from the registry are included alongside built-in commands.
+fn ghost_completion(input: &str, ext_ids: &[String]) -> Option<String> {
     let partial = input.strip_prefix('!')?;
     if partial.is_empty() || partial.contains(' ') {
         return None;
     }
-    const COMMANDS: &[&str] = &[
+    const BUILTIN: &[&str] = &[
         "help", "list", "history", "scan", "expand",
-        "verify", "use", "register", "active",
+        "verify", "use", "register", "active", "ollama",
     ];
-    let matches: Vec<&&str> = COMMANDS.iter()
-        .filter(|c| c.starts_with(partial) && **c != partial)
+    let mut all: Vec<&str> = BUILTIN.to_vec();
+    let ext_refs: Vec<&str> = ext_ids.iter().map(String::as_str).collect();
+    all.extend_from_slice(&ext_refs);
+
+    let matches: Vec<&str> = all.iter()
+        .copied()
+        .filter(|c| c.starts_with(partial) && *c != partial)
         .collect();
     if matches.len() == 1 {
         Some(matches[0][partial.len()..].to_string())
@@ -2214,6 +2276,178 @@ const OLLAMA_MODEL_RAM: &[(&str, f32)] = &[
     ("deepseek-r1:7b",   4.7),
 ];
 
+/// Renders a Lodge-style pre-launch card for an extension.
+/// Blocks until the user presses Enter (proceed) or Esc (cancel).
+/// Returns `Ok(true)` = proceed, `Ok(false)` = cancel.
+fn show_extension_card(
+    entry: &crate::engine::extensions::RegistryEntry,
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+) -> anyhow::Result<bool> {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+    use ratatui::{
+        layout::{Alignment, Constraint, Direction, Layout, Margin},
+        style::{Modifier, Style, Stylize},
+        text::{Line, Span},
+        widgets::{Block, BorderType, Borders, Paragraph},
+    };
+
+    // Drain any buffered key events — specifically the Enter that submitted
+    // the extension command must not be read as a confirmation in the card.
+    while event::poll(std::time::Duration::ZERO)? {
+        let _ = event::read();
+    }
+
+    loop {
+        terminal.draw(|f| {
+            let area = f.area();
+
+            // Same geometry as flashcard.rs — centred fixed-width card.
+            let card_w = area.width.min(58);
+            let card_h = area.height.min(22);
+            let h_pad = (area.width.saturating_sub(card_w)) / 2;
+            let v_pad = (area.height.saturating_sub(card_h)) / 2;
+
+            let card_area = ratatui::layout::Rect {
+                x: h_pad,
+                y: v_pad,
+                width: card_w,
+                height: card_h,
+            };
+
+            // Bordered block with SURFACE fill — matches install flashcard exactly.
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(Style::default().fg(palette::BORDER))
+                .style(Style::default().bg(palette::SURFACE));
+            f.render_widget(block, card_area);
+
+            let inner = card_area.inner(Margin {
+                horizontal: 2,
+                vertical: 1,
+            });
+
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // name + version
+                    Constraint::Length(1), // type badge right-aligned
+                    Constraint::Length(1), // blank
+                    Constraint::Length(1), // description
+                    Constraint::Length(1), // blank
+                    Constraint::Length(1), // divider
+                    Constraint::Length(1), // blank
+                    Constraint::Length(1), // command
+                    Constraint::Length(1), // status
+                    Constraint::Length(1), // blank
+                    Constraint::Length(1), // divider
+                    Constraint::Length(1), // blank
+                    Constraint::Length(1), // actions
+                    Constraint::Min(0),
+                ])
+                .split(inner);
+
+            // Row 0: name + version
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        &entry.name,
+                        Style::default().fg(palette::TEXT).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("v{}", entry.version),
+                        Style::default().fg(palette::TEXT_DIM),
+                    ),
+                ])),
+                rows[0],
+            );
+
+            // Row 1: "extension" right-aligned in accent — mirrors the type badge in flashcard
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("{:>width$}", "extension", width = inner.width as usize),
+                    Style::default().fg(palette::ACCENT),
+                )),
+                rows[1],
+            );
+
+            // Row 3: description, truncated to card width
+            let desc: String = {
+                let chars: Vec<char> = entry.description.chars().collect();
+                let max = inner.width as usize;
+                if chars.len() <= max {
+                    entry.description.clone()
+                } else {
+                    let cut: String = chars[..max.saturating_sub(1)].iter().collect();
+                    format!("{cut}…")
+                }
+            };
+            f.render_widget(
+                Paragraph::new(Span::styled(desc, Style::default().fg(palette::TEXT_DIM))),
+                rows[3],
+            );
+
+            // Dividers (rows 5 and 10)
+            let divider = "─".repeat(inner.width as usize);
+            for &row_idx in &[5usize, 10] {
+                f.render_widget(
+                    Paragraph::new(Span::styled(
+                        &divider,
+                        Style::default().fg(palette::BORDER),
+                    )),
+                    rows[row_idx],
+                );
+            }
+
+            let label_style = Style::default().fg(palette::TEXT_DIM);
+            let value_style = Style::default().fg(palette::TEXT);
+
+            // Row 7: command alias
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(format!("{:<14}", "command"), label_style),
+                    Span::styled(format!("!{}", entry.command_alias()), value_style),
+                ])),
+                rows[7],
+            );
+
+            // Row 8: status
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(format!("{:<14}", "status"), label_style),
+                    Span::styled(&entry.status, value_style),
+                ])),
+                rows[8],
+            );
+
+            // Row 12: actions — matches install flashcard key style exactly
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("[I]", Style::default().fg(palette::ACCENT).bold()),
+                    Span::styled(" step in          ", Style::default().fg(palette::TEXT_DIM)),
+                    Span::styled("[C]", Style::default().fg(palette::TEXT_DIM).bold()),
+                    Span::styled(" stay here", Style::default().fg(palette::TEXT_DIM)),
+                ]))
+                .alignment(Alignment::Center),
+                rows[12],
+            );
+        })?;
+
+        // Blocking read — same pattern as flashcard::show().
+        if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            match key.code {
+                KeyCode::Char('i') | KeyCode::Char('I') | KeyCode::Enter => return Ok(true),
+                KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc   => return Ok(false),
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Handle `!ollama <subcommand>` — Ollama model management.
 /// Suspend Lodge's TUI, run a Lodge extension binary as a subprocess, then
 /// restore the TUI when the process exits.
@@ -2225,9 +2459,11 @@ const OLLAMA_MODEL_RAM: &[(&str, f32)] = &[
 ///
 /// The TUI is fully suspended before the subprocess starts so the extension
 /// can own the terminal. After the subprocess exits the TUI is restored.
+/// `scan_path` is passed to the extension as `--path <scan_path> --lodge`.
+/// It is passed as a single `OsStr` argument so paths with spaces are safe.
 fn launch_extension(
     name: &str,
-    args: &[String],
+    scan_path: &str,
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
 ) -> anyhow::Result<()> {
     let ext_dir = crate::engine::extensions::extensions_dir();
@@ -2256,9 +2492,12 @@ fn launch_extension(
     )?;
     terminal.show_cursor()?;
 
-    // Spawn extension, inheriting stdin/stdout/stderr.
+    // Spawn extension — pass path and lodge flag as separate args so paths
+    // with spaces are handled correctly (no split_whitespace fragmentation).
     let status = std::process::Command::new(&bin_path)
-        .args(args)
+        .arg("--lodge")
+        .arg("--path")
+        .arg(scan_path)
         .status();
 
     // Restore TUI regardless of subprocess result.
