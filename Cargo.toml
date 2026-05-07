@@ -4,6 +4,7 @@ members = [
     "crates/brain",
     "crates/ruleset",
     "crates/shared",
+    "crates/clean-cabin",
 ]
 resolver = "2"
 

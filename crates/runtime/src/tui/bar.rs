@@ -1007,6 +1007,22 @@ pub fn run() -> anyhow::Result<()> {
                                 continue;
                             }
 
+                            // ── Clean Cabin extension ────────────────────────────────────
+                            if trimmed == "clean" || trimmed.starts_with("clean ") {
+                                let args: Vec<String> = trimmed
+                                    .trim_start_matches("clean")
+                                    .split_whitespace()
+                                    .map(str::to_string)
+                                    .collect();
+                                match launch_extension("clean-cabin", &args, &mut terminal) {
+                                    Ok(()) => {}
+                                    Err(e) => {
+                                        history.push((trimmed, format!("couldn't launch clean cabin — {e}")));
+                                    }
+                                }
+                                continue;
+                            }
+
                             // ── Help: route to the appropriate card ──────────────────────
                             if trimmed == "help" || trimmed.starts_with("help ") {
                                 let topic = trimmed.trim_start_matches("help").trim().to_string();
@@ -2199,6 +2215,96 @@ const OLLAMA_MODEL_RAM: &[(&str, f32)] = &[
 ];
 
 /// Handle `!ollama <subcommand>` — Ollama model management.
+/// Suspend Lodge's TUI, run a Lodge extension binary as a subprocess, then
+/// restore the TUI when the process exits.
+///
+/// Resolution order for the binary:
+///   1. `extensions/<name>[.exe]` alongside the running binary (or `./extensions/` in dev)
+///   2. `extensions/<name>/<name>[.exe]` (extracted zip layout)
+///   3. Download via the registry if a `payload_url` is present
+///
+/// The TUI is fully suspended before the subprocess starts so the extension
+/// can own the terminal. After the subprocess exits the TUI is restored.
+fn launch_extension(
+    name: &str,
+    args: &[String],
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+) -> anyhow::Result<()> {
+    let ext_dir = crate::engine::extensions::extensions_dir();
+
+    // Locate the binary.
+    let bin_name = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    let candidates = [
+        ext_dir.join(&bin_name),
+        ext_dir.join(name).join(&bin_name),
+    ];
+
+    let bin_path = candidates.iter().find(|p| p.exists()).cloned()
+        .or_else(|| try_download_extension(name, &ext_dir).ok())
+        .ok_or_else(|| anyhow::anyhow!(
+            "extension '{name}' not found.\n  \
+             install it by placing {bin_name} in the extensions/ directory,\n  \
+             or wait for it to appear in the registry."
+        ))?;
+
+    // Suspend TUI.
+    crossterm::terminal::disable_raw_mode()?;
+    crossterm::execute!(
+        terminal.backend_mut(),
+        crossterm::terminal::LeaveAlternateScreen,
+        crossterm::event::DisableMouseCapture,
+    )?;
+    terminal.show_cursor()?;
+
+    // Spawn extension, inheriting stdin/stdout/stderr.
+    let status = std::process::Command::new(&bin_path)
+        .args(args)
+        .status();
+
+    // Restore TUI regardless of subprocess result.
+    crossterm::terminal::enable_raw_mode()?;
+    crossterm::execute!(
+        terminal.backend_mut(),
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture,
+    )?;
+    terminal.clear()?;
+
+    status?;
+    Ok(())
+}
+
+/// Try to download an extension binary from the registry, extract it into
+/// `dest_dir`, and return the path to the binary.
+fn try_download_extension(name: &str, dest_dir: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    let (entries, _online) = crate::engine::extensions::fetch_registry();
+    let entry = entries.iter()
+        .find(|e| e.id == name)
+        .ok_or_else(|| anyhow::anyhow!("'{name}' not in registry"))?;
+
+    if entry.payload_url.as_deref().map(str::is_empty).unwrap_or(true) {
+        anyhow::bail!("no download URL for '{name}'");
+    }
+
+    // Download + verify.
+    let (zip_path, _verified) = crate::engine::extensions::download_extension(entry, dest_dir)?;
+
+    // Extract the zip.
+    let zip_file = std::fs::File::open(&zip_path)?;
+    let mut archive = zip::ZipArchive::new(zip_file)?;
+    archive.extract(dest_dir)?;
+    std::fs::remove_file(&zip_path).ok();
+
+    // Find the binary after extraction.
+    let bin_name = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    let candidates = [
+        dest_dir.join(&bin_name),
+        dest_dir.join(name).join(&bin_name),
+    ];
+    candidates.iter().find(|p| p.exists()).cloned()
+        .ok_or_else(|| anyhow::anyhow!("binary '{bin_name}' not found after extraction"))
+}
+
 fn handle_ollama_command(args: &str) -> String {
     let (sub, rest) = args.split_once(' ').unwrap_or((args, ""));
     let rest = rest.trim();
