@@ -105,24 +105,33 @@ impl SynonymAnim {
 
 /// Wipe-up animation played when `!clr` is submitted.
 ///
-/// The history snapshot shrinks from the bottom each tick until empty,
-/// giving the impression of lines being swept upward off the screen.
+/// One entry is removed from the bottom every STEP_MS milliseconds so the
+/// sweep is perceptible regardless of how many entries are in history.
 struct ClrAnim {
     snapshot:  Vec<(String, String)>,
     remaining: usize,
+    last_step: std::time::Instant,
 }
 
 impl ClrAnim {
+    /// Milliseconds between each entry being wiped off.
+    const STEP_MS: u64 = 80;
+
     fn new(snapshot: Vec<(String, String)>) -> Self {
         let remaining = snapshot.len();
-        Self { snapshot, remaining }
+        Self { snapshot, remaining, last_step: std::time::Instant::now() }
     }
 
-    /// Advance one frame. Returns `true` when the animation is complete.
+    /// Called every loop tick. Removes one entry if enough time has elapsed.
+    /// Returns `true` when the animation is complete.
     fn tick(&mut self) -> bool {
-        // Remove at least 1 entry per frame; larger histories sweep faster.
-        let step = (self.snapshot.len() / 10).max(1);
-        self.remaining = self.remaining.saturating_sub(step);
+        if self.remaining == 0 {
+            return true;
+        }
+        if self.last_step.elapsed() >= std::time::Duration::from_millis(Self::STEP_MS) {
+            self.remaining -= 1;
+            self.last_step = std::time::Instant::now();
+        }
         self.remaining == 0
     }
 
