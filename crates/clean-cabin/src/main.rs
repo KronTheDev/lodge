@@ -9,9 +9,10 @@ mod palette;
 mod report;
 mod scanner;
 
-use std::io::{self, Write};
+use std::io;
 use std::path::PathBuf;
-use std::thread;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -33,6 +34,9 @@ use scanner::heuristics::TierHint;
 
 fn main() {
     if let Err(e) = run() {
+        // Attempt to restore terminal before printing error.
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
         eprintln!("clean-cabin: {e}");
         std::process::exit(1);
     }
@@ -42,7 +46,7 @@ fn run() -> Result<()> {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
 
     // Strip Lodge-injected control flags before subcommand dispatch.
-    let lodge_launched = raw_args.iter().any(|a| a == "--lodge");
+    let _lodge_launched = raw_args.iter().any(|a| a == "--lodge");
     let lodge_path: Option<PathBuf> = {
         let mut p = None;
         let mut iter = raw_args.iter();
@@ -58,8 +62,13 @@ fn run() -> Result<()> {
         let mut out = Vec::new();
         let mut iter = raw_args.iter();
         while let Some(a) = iter.next() {
-            if a == "--lodge" { continue; }
-            if a == "--path" { iter.next(); continue; } // skip value too
+            if a == "--lodge" {
+                continue;
+            }
+            if a == "--path" {
+                iter.next(); // skip value
+                continue;
+            }
             out.push(a.clone());
         }
         out
@@ -67,7 +76,7 @@ fn run() -> Result<()> {
 
     match args.as_slice() {
         [] | [_] if args.first().map(|a| a == "clean").unwrap_or(true) => {
-            cmd_scan(lodge_path, lodge_launched)
+            cmd_scan(lodge_path)
         }
         [sub] if sub == "recover" => cmd_recover(false),
         [sub, flag] if sub == "recover" && flag == "--all" => cmd_recover(true),
@@ -78,9 +87,6 @@ fn run() -> Result<()> {
             cmd_purge(Some(cutoff))
         }
         [sub] if sub == "config" => cmd_config_show(),
-        [sub, key, value] if sub == "config" && key.as_str() == "set" => {
-            Err(anyhow::anyhow!("usage: clean-cabin config set <key> <value>"))
-        }
         [sub, cmd, key, value] if sub == "config" && cmd.as_str() == "set" => {
             cmd_config_set(key, value)
         }
@@ -96,63 +102,72 @@ fn run() -> Result<()> {
 // ── Subcommands ───────────────────────────────────────────────────────────────
 
 /// Full scan → interactive report → staging flow.
-fn cmd_scan(scan_path: Option<PathBuf>, _lodge_launched: bool) -> Result<()> {
+fn cmd_scan(scan_path: Option<PathBuf>) -> Result<()> {
     let config = Config::load();
-
-    // Use Lodge-provided path, or prompt the user interactively.
-    let dirs = if let Some(p) = scan_path {
-        if p.exists() {
-            vec![p]
-        } else {
-            anyhow::bail!("path does not exist: {}", p.display());
-        }
-    } else {
-        let d = prompt_directories()?;
-        if d.is_empty() {
-            println!("nothing to scan.");
-            return Ok(());
-        }
-        d
-    };
 
     // Auto-purge old sessions silently.
     staging::auto_purge(config.retention_days);
 
-    // Walk and score.
-    println!("scanning...");
-    let entries = scanner::walk(&dirs, &config.scan_exclude);
+    // Single enter_tui() / leave_tui() pair for the whole flow.
+    let mut terminal = enter_tui()?;
+
+    // ── Step 2: Directory prompt ──────────────────────────────────────────────
+    let result = run_dir_prompt(&mut terminal, scan_path.clone());
+    let (dirs, exclusions) = match result {
+        None => {
+            leave_tui(&mut terminal)?;
+            return Ok(());
+        }
+        Some(pair) => pair,
+    };
+
+    // ── Step 3: Scan progress ─────────────────────────────────────────────────
+    let mut combined_exclude = config.scan_exclude.clone();
+    combined_exclude.extend(exclusions);
+
+    let entries = run_scan_progress(&mut terminal, &dirs, &combined_exclude)?;
     let total = entries.len();
-    println!("  {total} files found — scoring...");
+    let _ = total;
+
+    // ── Step 4: Score + AI ────────────────────────────────────────────────────
+    {
+        // Show "thinking..." while scoring.
+        let dirs_clone = dirs.clone();
+        terminal.draw(|f| {
+            report::renderer::render_scan_progress(
+                &dirs_label(&dirs_clone),
+                entries.len(),
+                0,
+                0,
+                f,
+            );
+        })?;
+    }
 
     let guarded = scanner::receipt_guard::load_receipt_paths();
     let mut hashes = std::collections::HashMap::new();
 
-    // Heuristic scoring.
-    let mut scored: Vec<(scanner::walker::FileEntry, scanner::heuristics::HeuristicScore)> = entries
-        .into_iter()
-        .map(|entry| {
-            let mut score = scanner::heuristics::score(&entry, &config, &mut hashes);
-            score.is_receipt_guarded = scanner::receipt_guard::is_guarded(&entry.path, &guarded);
-            (entry, score)
-        })
-        .filter(|(_, s)| s.tier_hint != TierHint::Keep)
-        .collect();
+    let mut scored: Vec<(scanner::walker::FileEntry, scanner::heuristics::HeuristicScore)> =
+        entries
+            .into_iter()
+            .map(|entry| {
+                let mut score = scanner::heuristics::score(&entry, &config, &mut hashes);
+                score.is_receipt_guarded =
+                    scanner::receipt_guard::is_guarded(&entry.path, &guarded);
+                (entry, score)
+            })
+            .filter(|(_, s)| s.tier_hint != TierHint::Keep)
+            .collect();
 
-    // Optional AI scoring.
     let no_ai = config.ai_mode == config::AiMode::None;
     let ai_scores: Vec<scanner::ai_scorer::AiScore> = if !no_ai {
-        print!("  running AI scorer...");
-        io::stdout().flush().unwrap_or_default();
         let entries_ref: Vec<&scanner::walker::FileEntry> =
             scored.iter().map(|(e, _)| e).collect();
-        let ai = scanner::ai_scorer::score_batch(&entries_ref, &config);
-        println!(" done.");
-        ai
+        scanner::ai_scorer::score_batch(&entries_ref, &config)
     } else {
         Vec::new()
     };
 
-    // Build flagged file list.
     let flagged: Vec<FlaggedFile> = scored
         .drain(..)
         .enumerate()
@@ -182,49 +197,59 @@ fn cmd_scan(scan_path: Option<PathBuf>, _lodge_launched: bool) -> Result<()> {
         .filter(|f| f.tier != Tier::YouDecide || !no_ai)
         .collect();
 
+    // ── Step 5 / 6: Empty result ──────────────────────────────────────────────
     if flagged.is_empty() {
-        println!("nothing to clean up. the cabin is already tidy.");
+        run_message_screen(
+            &mut terminal,
+            "nothing to clean up. the cabin is already tidy.",
+        )?;
+        leave_tui(&mut terminal)?;
         return Ok(());
     }
 
     let mut state = SelectionState::new(flagged);
 
-    // Enter ratatui TUI.
-    let mut terminal = enter_tui()?;
+    // ── Step 5: Interactive report ────────────────────────────────────────────
+    let outcome = run_report_loop(&mut terminal, &mut state, no_ai, &dirs)?;
 
-    let result = run_report_loop(&mut terminal, &mut state, no_ai);
-
-    leave_tui(&mut terminal)?;
-
-    match result? {
-        ReportOutcome::Quit => {
-            println!("nothing moved.");
-        }
-        ReportOutcome::Proceed => {
-            let selected: Vec<&FlaggedFile> = state.selected_files();
-            if selected.is_empty() {
-                println!("nothing selected.");
-                return Ok(());
-            }
-
-            // Confirmation screen.
-            let session_id = staging::new_session_id();
-            let n = selected.len();
-            let size = state.selected_size();
-            let root = staging::staging_root();
-            let retention = config.retention_days;
-
-            let confirmed = run_confirmation_screen(n, size, &session_id, retention, &root)?;
-            if !confirmed {
-                println!("nothing moved.");
-                return Ok(());
-            }
-
-            // Stage files with live progress.
-            run_staging_progress(&selected, &session_id, &config)?;
-        }
+    if let ReportOutcome::Quit = outcome {
+        leave_tui(&mut terminal)?;
+        return Ok(());
     }
 
+    let selected: Vec<&FlaggedFile> = state.selected_files();
+    if selected.is_empty() {
+        leave_tui(&mut terminal)?;
+        return Ok(());
+    }
+
+    // ── Step 6: Confirmation ──────────────────────────────────────────────────
+    let session_id = staging::new_session_id();
+    let n = selected.len();
+    let size = state.selected_size();
+    let root = staging::staging_root();
+
+    let confirmed = run_confirmation_screen(
+        &mut terminal,
+        n,
+        size,
+        &session_id,
+        config.retention_days,
+        &root,
+    )?;
+
+    if !confirmed {
+        leave_tui(&mut terminal)?;
+        return Ok(());
+    }
+
+    // ── Step 7: Staging sequence ──────────────────────────────────────────────
+    let (session_dir, manifest) = staging::init_session(&selected, &session_id)
+        .context("couldn't initialise staging session")?;
+
+    run_staging_sequence(&mut terminal, &manifest, &session_dir, &config)?;
+
+    leave_tui(&mut terminal)?;
     Ok(())
 }
 
@@ -233,203 +258,548 @@ enum ReportOutcome {
     Proceed,
 }
 
-fn run_report_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    state: &mut SelectionState,
-    no_ai: bool,
-) -> Result<ReportOutcome> {
-    loop {
-        terminal.draw(|f| report::renderer::render(state, no_ai, f))?;
+// ── TUI screens ───────────────────────────────────────────────────────────────
 
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                match (key.code, key.modifiers) {
-                    (KeyCode::Char('q') | KeyCode::Esc, _) => {
-                        return Ok(ReportOutcome::Quit);
+/// Step 2: Directory prompt. Returns `None` if user cancelled.
+fn run_dir_prompt(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    initial_path: Option<PathBuf>,
+) -> Option<(Vec<PathBuf>, Vec<String>)> {
+    let mut confirmed_dirs: Vec<PathBuf> = Vec::new();
+    let mut exclusions: Vec<String> = Vec::new();
+    let mut input = String::new();
+    let mut exclusion_mode = false;
+
+    // Pre-fill with initial_path if provided.
+    if let Some(ref p) = initial_path {
+        input = p.to_string_lossy().to_string();
+    }
+
+    loop {
+        let _ = terminal.draw(|f| {
+            report::renderer::render_dir_prompt(
+                &confirmed_dirs,
+                &exclusions,
+                &input,
+                exclusion_mode,
+                f,
+            );
+        });
+
+        let Ok(true) = event::poll(Duration::from_millis(50)) else {
+            continue;
+        };
+
+        let Ok(Event::Key(key)) = event::read() else {
+            continue;
+        };
+
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _)
+            | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                return None;
+            }
+            (KeyCode::Enter, _) => {
+                if !input.is_empty() {
+                    let p = PathBuf::from(input.trim());
+                    if exclusion_mode {
+                        exclusions.push(input.trim().to_string());
+                    } else {
+                        confirmed_dirs.push(p);
                     }
-                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                        return Ok(ReportOutcome::Quit);
+                    input.clear();
+                    exclusion_mode = false;
+                } else {
+                    // Empty input — proceed with what we have.
+                    if confirmed_dirs.is_empty() {
+                        // Default to home directory.
+                        if let Some(home) = home_dir() {
+                            confirmed_dirs.push(home);
+                        } else {
+                            continue;
+                        }
                     }
-                    (KeyCode::Enter, _) if !state.selected_files().is_empty() => {
-                        return Ok(ReportOutcome::Proceed);
+                    // Filter to only existing dirs.
+                    let valid: Vec<PathBuf> = confirmed_dirs
+                        .into_iter()
+                        .filter(|p| p.exists())
+                        .collect();
+                    if valid.is_empty() {
+                        return None;
                     }
-                    (KeyCode::Char(' '), _) => state.toggle_current(),
-                    (KeyCode::Up, _) => state.move_up(),
-                    (KeyCode::Down, _) => state.move_down(),
-                    (KeyCode::Tab, _) => state.cycle_tier(),
-                    (KeyCode::Right, _) => {
-                        state.you_decide_expanded = !state.you_decide_expanded;
-                    }
-                    (KeyCode::Char('a') | KeyCode::Char('A'), _) => {
-                        state.select_all_in_tier(state.tier_focus);
-                    }
-                    (KeyCode::Char('n') | KeyCode::Char('N'), _) => {
-                        state.deselect_all_in_tier(state.tier_focus);
-                    }
-                    _ => {}
+                    return Some((valid, exclusions));
                 }
             }
+            (KeyCode::Tab, _) if !input.is_empty() => {
+                // Add current path to confirmed list, clear for another.
+                let p = PathBuf::from(input.trim());
+                if exclusion_mode {
+                    exclusions.push(input.trim().to_string());
+                    exclusion_mode = false;
+                } else {
+                    confirmed_dirs.push(p);
+                }
+                input.clear();
+            }
+            (KeyCode::Tab, _) => {}
+            (KeyCode::Char('e') | KeyCode::Char('E'), KeyModifiers::NONE)
+            | (KeyCode::Char('e') | KeyCode::Char('E'), KeyModifiers::SHIFT) => {
+                if input.is_empty() {
+                    exclusion_mode = true;
+                } else {
+                    input.push(if key.code == KeyCode::Char('e') { 'e' } else { 'E' });
+                }
+            }
+            (KeyCode::Backspace, _) => {
+                input.pop();
+            }
+            (KeyCode::Char(c), _) => {
+                input.push(c);
+            }
+            _ => {}
         }
     }
 }
 
+/// Step 3: Scan progress — walks in a background thread, polls for updates.
+fn run_scan_progress(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    dirs: &[PathBuf],
+    exclude: &[String],
+) -> Result<Vec<scanner::walker::FileEntry>> {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter_clone = counter.clone();
+
+    let dirs_clone = dirs.to_vec();
+    let exclude_clone = exclude.to_vec();
+    let label = dirs_label(dirs);
+
+    // Spawn walk on background thread.
+    let handle = std::thread::spawn(move || {
+        scanner::walker::walk_with_progress(
+            &dirs_clone,
+            &exclude_clone,
+            counter_clone,
+            |_| {},
+        )
+    });
+
+    let mut spinner_frame: u8 = 0;
+    let mut frame_tick: u32 = 0;
+
+    loop {
+        let count = counter.load(Ordering::Relaxed);
+
+        terminal.draw(|f| {
+            report::renderer::render_scan_progress(&label, count, 0, spinner_frame, f);
+        })?;
+
+        if handle.is_finished() {
+            break;
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+        frame_tick += 1;
+        if frame_tick.is_multiple_of(4) {
+            spinner_frame = spinner_frame.wrapping_add(1);
+        }
+
+        // Check for Ctrl+C / Esc while scanning.
+        if event::poll(Duration::from_millis(0))? {
+            if let Event::Key(key) = event::read()? {
+                if matches!(key.code, KeyCode::Esc)
+                    || (key.code == KeyCode::Char('c')
+                        && key.modifiers == KeyModifiers::CONTROL)
+                {
+                    // We can't cancel the thread easily; just return empty.
+                    return Ok(Vec::new());
+                }
+            }
+        }
+    }
+
+    let entries = handle.join().unwrap_or_default();
+    Ok(entries)
+}
+
+/// Step 5: Interactive report loop.
+fn run_report_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &mut SelectionState,
+    no_ai: bool,
+    dirs: &[PathBuf],
+) -> Result<ReportOutcome> {
+    loop {
+        terminal.draw(|f| report::renderer::render(state, no_ai, dirs, f))?;
+
+        if !event::poll(Duration::from_millis(50))? {
+            continue;
+        }
+
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('q') | KeyCode::Char('Q'), _) | (KeyCode::Esc, _) => {
+                // If detail panel is open, Esc closes it instead of quitting.
+                if state.detail_file.is_some() {
+                    state.detail_file = None;
+                } else {
+                    return Ok(ReportOutcome::Quit);
+                }
+            }
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                return Ok(ReportOutcome::Quit);
+            }
+            (KeyCode::Enter, _) => {
+                if state.detail_file.is_some() {
+                    // Close detail panel.
+                    state.detail_file = None;
+                } else if !state.selected_files().is_empty() {
+                    return Ok(ReportOutcome::Proceed);
+                } else {
+                    // No files selected — open detail for cursor file.
+                    if state.visible_count() > 0 {
+                        state.detail_file = Some(state.cursor);
+                    }
+                }
+            }
+            (KeyCode::Char(' '), _) if state.detail_file.is_none() => {
+                state.toggle_current();
+            }
+            (KeyCode::Up, _) if state.detail_file.is_none() => {
+                state.move_up();
+            }
+            (KeyCode::Down, _) if state.detail_file.is_none() => {
+                state.move_down();
+            }
+            (KeyCode::Tab, _) if state.detail_file.is_none() => {
+                state.cycle_tier();
+            }
+            (KeyCode::Right, _) if state.detail_file.is_none() => {
+                state.you_decide_expanded = !state.you_decide_expanded;
+            }
+            (KeyCode::Char('a') | KeyCode::Char('A'), _) if state.detail_file.is_none() => {
+                state.select_all_in_tier(state.tier_focus);
+            }
+            (KeyCode::Char('n') | KeyCode::Char('N'), _) if state.detail_file.is_none() => {
+                state.deselect_all_in_tier(state.tier_focus);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Step 6: Confirmation screen.
 fn run_confirmation_screen(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     n: usize,
     size: u64,
     session_id: &str,
     retention_days: u32,
     root: &std::path::Path,
 ) -> Result<bool> {
-    let mut terminal = enter_tui()?;
-
-    let result = loop {
+    loop {
         terminal.draw(|f| {
-            report::renderer::render_confirmation(n, size, session_id, retention_days, root, f)
+            report::renderer::render_confirmation(n, size, session_id, retention_days, root, f);
         })?;
 
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Enter => break true,
-                    KeyCode::Esc => break false,
-                    KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => break false,
-                    _ => {}
+        if !event::poll(Duration::from_millis(50))? {
+            continue;
+        }
+
+        if let Event::Key(key) = event::read()? {
+            match key.code {
+                KeyCode::Enter => return Ok(true),
+                KeyCode::Esc => return Ok(false),
+                KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
+                    return Ok(false);
                 }
+                _ => {}
             }
         }
-    };
-
-    leave_tui(&mut terminal)?;
-    Ok(result)
+    }
 }
 
-fn run_staging_progress(
-    selected: &[&FlaggedFile],
-    session_id: &str,
+/// Step 7: Staging sequence — moves files one at a time with TUI redraws.
+fn run_staging_sequence(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    manifest: &staging::StagingManifest,
+    session_dir: &std::path::Path,
     config: &Config,
 ) -> Result<()> {
-    let manifest = staging::stage_files(selected, session_id)
-        .context("staging failed")?;
+    let files = &manifest.files;
+    let total = files.len();
+    let mut total_freed: u64 = 0;
 
-    let n = manifest.files.len();
-    let total_size: u64 = manifest.files.iter().map(|f| f.size).sum();
-    let expiry = staging::expiry_date(session_id, config.retention_days)
+    for (i, staged) in files.iter().enumerate() {
+        // Render with this file as active.
+        terminal.draw(|f| {
+            report::renderer::render_staging_sequence(files, i, Some(i), f);
+        })?;
+
+        let freed = staging::stage_one_file(session_dir, staged).unwrap_or(0);
+        total_freed += freed;
+    }
+
+    // Render all done.
+    terminal.draw(|f| {
+        report::renderer::render_staging_sequence(files, total, None, f);
+    })?;
+
+    // Brief pause to show completed state, then switch to summary.
+    std::thread::sleep(Duration::from_millis(600));
+
+    let expiry = staging::expiry_date(&manifest.session_id, config.retention_days)
         .map(|d| d.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "unknown".into());
 
-    // Simple stdout summary (TUI already left).
-    println!();
-    for sf in &manifest.files {
-        let name = sf
-            .original_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| sf.staged_name.clone());
-        println!("  ✔  {name}  → staging");
+    terminal.draw(|f| {
+        report::renderer::render_staging_complete(total, total_freed, &expiry, f);
+    })?;
+
+    // Wait for any keypress.
+    loop {
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(_) = event::read()? {
+                break;
+            }
+        }
     }
 
-    let size_str = fmt_size(total_size);
-    println!();
-    println!("  {n} files moved to staging. {size_str} freed.");
-    println!(
-        "  they'll be permanently removed on {expiry} unless recovered."
-    );
-    println!("  recover with:  clean-cabin recover");
-    println!();
-
-    thread::sleep(Duration::from_secs(3));
     Ok(())
 }
 
-/// Interactive recovery: list sessions and let the user choose one.
+/// Display a brief message screen and wait for a keypress.
+fn run_message_screen(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    msg: &str,
+) -> Result<()> {
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Paragraph};
+    use ratatui::style::Style;
+
+    let msg_owned = msg.to_string();
+
+    terminal.draw(|f| {
+        let area = f.area();
+        f.render_widget(
+            Block::default().style(Style::default().bg(crate::palette::BG)),
+            area,
+        );
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("  {msg_owned}"),
+                Style::default().fg(crate::palette::TEXT),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  press any key to continue",
+                Style::default().fg(crate::palette::CANDLE),
+            )),
+        ];
+        f.render_widget(Paragraph::new(lines).style(Style::default().bg(crate::palette::BG)), area);
+    })?;
+
+    loop {
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(_) = event::read()? {
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ── cmd_recover ───────────────────────────────────────────────────────────────
+
+/// Interactive recovery: TUI session picker.
 fn cmd_recover(recover_all: bool) -> Result<()> {
     let sessions = staging::list_sessions();
 
     if sessions.is_empty() {
-        println!("no staged sessions found.");
+        let mut terminal = enter_tui()?;
+        run_message_screen(&mut terminal, "no staged sessions found.")?;
+        leave_tui(&mut terminal)?;
         return Ok(());
     }
 
     if recover_all {
-        // Recover the most recent session.
+        let mut terminal = enter_tui()?;
         let (session_id, manifest) = sessions.last().context("no sessions")?;
+        let total = manifest.files.len();
+
+        terminal.draw(|f| {
+            report::renderer::render_recover_result(session_id, 0, total, f);
+        })?;
+
         let n = staging::recover_session(session_id)?;
-        println!(
-            "  recovered {n} / {} files from session {session_id}.",
-            manifest.files.len()
-        );
+
+        terminal.draw(|f| {
+            report::renderer::render_recover_result(session_id, n, total, f);
+        })?;
+
+        loop {
+            if event::poll(Duration::from_millis(100))? {
+                if let Event::Key(_) = event::read()? {
+                    break;
+                }
+            }
+        }
+
+        leave_tui(&mut terminal)?;
         return Ok(());
     }
 
-    println!("staged sessions:\n");
-    for (i, (session_id, manifest)) in sessions.iter().enumerate() {
-        let total_size: u64 = manifest.files.iter().map(|f| f.size).sum();
-        println!(
-            "  [{i}]  {session_id}  ({} files · {})",
-            manifest.files.len(),
-            fmt_size(total_size),
-        );
+    let mut terminal = enter_tui()?;
+    let mut cursor = sessions.len().saturating_sub(1); // default to most recent
+
+    loop {
+        terminal.draw(|f| {
+            report::renderer::render_recover_picker(&sessions, cursor, f);
+        })?;
+
+        if !event::poll(Duration::from_millis(50))? {
+            continue;
+        }
+
+        let Ok(Event::Key(key)) = event::read() else {
+            continue;
+        };
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                leave_tui(&mut terminal)?;
+                return Ok(());
+            }
+            KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
+                leave_tui(&mut terminal)?;
+                return Ok(());
+            }
+            KeyCode::Up if cursor > 0 => {
+                cursor = cursor.saturating_sub(1);
+            }
+            KeyCode::Down if cursor + 1 < sessions.len() => {
+                cursor += 1;
+            }
+            KeyCode::Enter => {
+                let (session_id, manifest) = &sessions[cursor];
+                let total = manifest.files.len();
+                let session_id = session_id.clone();
+
+                terminal.draw(|f| {
+                    report::renderer::render_recover_result(&session_id, 0, total, f);
+                })?;
+
+                let n = staging::recover_session(&session_id)?;
+
+                terminal.draw(|f| {
+                    report::renderer::render_recover_result(&session_id, n, total, f);
+                })?;
+
+                loop {
+                    if event::poll(Duration::from_millis(100))? {
+                        if let Event::Key(_) = event::read()? {
+                            break;
+                        }
+                    }
+                }
+
+                leave_tui(&mut terminal)?;
+                return Ok(());
+            }
+            _ => {}
+        }
     }
-
-    print!("\nrecover which session? (index or Enter to cancel): ");
-    io::stdout().flush().unwrap_or_default();
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap_or_default();
-    let input = input.trim();
-
-    if input.is_empty() {
-        println!("cancelled.");
-        return Ok(());
-    }
-
-    let idx: usize = input
-        .parse()
-        .with_context(|| format!("'{input}' is not a valid index"))?;
-
-    let (session_id, manifest) = sessions.get(idx).context("index out of range")?;
-    let n = staging::recover_session(session_id)?;
-    println!(
-        "  recovered {n} / {} files from session {session_id}.",
-        manifest.files.len()
-    );
-
-    Ok(())
 }
+
+// ── cmd_purge ─────────────────────────────────────────────────────────────────
 
 /// Purge staged files, optionally restricted to sessions before a cutoff date.
 fn cmd_purge(cutoff: Option<chrono::NaiveDate>) -> Result<()> {
     match cutoff {
         Some(date) => {
+            let mut terminal = enter_tui()?;
             let (count, freed) = staging::purge_before(date)?;
-            println!(
-                "  purged {count} sessions before {date}. {} freed.",
-                fmt_size(freed)
-            );
+            terminal.draw(|f| {
+                report::renderer::render_purge_done(count, freed, f);
+            })?;
+            loop {
+                if event::poll(Duration::from_millis(100))? {
+                    if let Event::Key(_) = event::read()? {
+                        break;
+                    }
+                }
+            }
+            leave_tui(&mut terminal)?;
         }
         None => {
-            print!("purge all staged sessions? this cannot be undone. [y/N]: ");
-            io::stdout().flush().unwrap_or_default();
-            let mut input = String::new();
-            io::stdin().read_line(&mut input).unwrap_or_default();
-            if input.trim().eq_ignore_ascii_case("y") {
-                let sessions = staging::list_sessions();
-                let mut total_freed = 0u64;
-                for (session_id, _) in &sessions {
-                    total_freed += staging::purge_session(session_id).unwrap_or(0);
+            let sessions = staging::list_sessions();
+
+            if sessions.is_empty() {
+                let mut terminal = enter_tui()?;
+                run_message_screen(&mut terminal, "no staged sessions found.")?;
+                leave_tui(&mut terminal)?;
+                return Ok(());
+            }
+
+            let mut terminal = enter_tui()?;
+
+            loop {
+                terminal.draw(|f| {
+                    report::renderer::render_purge_confirm(sessions.len(), f);
+                })?;
+
+                if !event::poll(Duration::from_millis(50))? {
+                    continue;
                 }
-                println!(
-                    "  purged {} sessions. {} freed.",
-                    sessions.len(),
-                    fmt_size(total_freed)
-                );
-            } else {
-                println!("  cancelled.");
+
+                let Ok(Event::Key(key)) = event::read() else {
+                    continue;
+                };
+
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        leave_tui(&mut terminal)?;
+                        return Ok(());
+                    }
+                    KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
+                        leave_tui(&mut terminal)?;
+                        return Ok(());
+                    }
+                    KeyCode::Enter => {
+                        let mut total_freed = 0u64;
+                        for (session_id, _) in &sessions {
+                            total_freed += staging::purge_session(session_id).unwrap_or(0);
+                        }
+
+                        terminal.draw(|f| {
+                            report::renderer::render_purge_done(sessions.len(), total_freed, f);
+                        })?;
+
+                        loop {
+                            if event::poll(Duration::from_millis(100))? {
+                                if let Event::Key(_) = event::read()? {
+                                    break;
+                                }
+                            }
+                        }
+
+                        leave_tui(&mut terminal)?;
+                        return Ok(());
+                    }
+                    _ => {}
+                }
             }
         }
     }
     Ok(())
 }
+
+// ── Config commands ───────────────────────────────────────────────────────────
 
 fn cmd_config_show() -> Result<()> {
     let config = Config::load();
@@ -465,33 +835,6 @@ fn leave_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
-fn prompt_directories() -> Result<Vec<PathBuf>> {
-    print!("directory to scan (Enter for home): ");
-    io::stdout().flush().unwrap_or_default();
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap_or_default();
-    let input = input.trim();
-
-    if input.is_empty() {
-        // Default to home directory.
-        let home = home_dir().context("couldn't determine home directory")?;
-        return Ok(vec![home]);
-    }
-
-    let paths: Vec<PathBuf> = input
-        .split(';')
-        .map(|s| PathBuf::from(s.trim()))
-        .filter(|p| p.exists())
-        .collect();
-
-    if paths.is_empty() {
-        anyhow::bail!("none of the specified paths exist");
-    }
-
-    Ok(paths)
-}
-
 fn home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
@@ -503,19 +846,21 @@ fn home_dir() -> Option<PathBuf> {
     }
 }
 
-fn fmt_size(bytes: u64) -> String {
-    if bytes == 0 {
-        return "0 B".into();
+/// Build a short label for the scanned directories.
+fn dirs_label(dirs: &[PathBuf]) -> String {
+    if dirs.is_empty() {
+        return String::new();
     }
-    let mb = bytes / (1024 * 1024);
-    if mb >= 1 {
-        format!("{mb} MB")
-    } else {
-        let kb = bytes / 1024;
-        if kb >= 1 {
-            format!("{kb} KB")
-        } else {
-            format!("{bytes} B")
+    if dirs.len() == 1 {
+        // Shorten with ~ if possible.
+        let p = dirs[0].to_string_lossy();
+        if let Some(home) = home_dir() {
+            let home_s = home.to_string_lossy();
+            if let Some(rest) = p.strip_prefix(home_s.as_ref()) {
+                return format!("~{rest}");
+            }
         }
+        return p.to_string();
     }
+    format!("{} directories", dirs.len())
 }

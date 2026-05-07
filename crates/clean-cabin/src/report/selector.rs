@@ -22,12 +22,14 @@ pub struct FlaggedFile {
 pub struct SelectionState {
     /// All flagged files, sorted by tier then path.
     pub files: Vec<FlaggedFile>,
-    /// Index of the currently focused file.
+    /// Index of the currently focused file in the visible list.
     pub cursor: usize,
     /// Which tier section the cursor is active in.
     pub tier_focus: Tier,
     /// Whether the YouDecide section is expanded (files shown).
     pub you_decide_expanded: bool,
+    /// If `Some(idx)`, a detail panel is shown for the file at visible index `idx`.
+    pub detail_file: Option<usize>,
 }
 
 impl SelectionState {
@@ -60,6 +62,7 @@ impl SelectionState {
             cursor: 0,
             tier_focus,
             you_decide_expanded: false,
+            detail_file: None,
         }
     }
 
@@ -122,7 +125,11 @@ impl SelectionState {
             Tier::YouDecide => Tier::ClearOut,
         };
         // Move cursor to the first file in the newly focused tier.
-        if let Some(pos) = self.visible_files().iter().position(|(_, f)| f.tier == self.tier_focus) {
+        if let Some(pos) = self
+            .visible_files()
+            .iter()
+            .position(|(_, f)| f.tier == self.tier_focus)
+        {
             self.cursor = pos;
         }
     }
@@ -151,9 +158,7 @@ impl SelectionState {
         self.files
             .iter()
             .enumerate()
-            .filter(|(_, f)| {
-                f.tier != Tier::YouDecide || self.you_decide_expanded
-            })
+            .filter(|(_, f)| f.tier != Tier::YouDecide || self.you_decide_expanded)
             .collect()
     }
 

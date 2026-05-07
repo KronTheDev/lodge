@@ -1,6 +1,8 @@
 //! Directory walker — produces a flat list of `FileEntry` values.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use walkdir::WalkDir;
@@ -90,6 +92,7 @@ fn is_user_excluded(path: &Path, exclude: &[String]) -> bool {
 
 /// Walk `dirs`, returning all discoverable files and directories, filtered
 /// by system hard-excludes and the user-supplied `exclude` list.
+#[allow(dead_code)]
 pub fn walk(dirs: &[PathBuf], exclude: &[String]) -> Vec<FileEntry> {
     let mut entries = Vec::new();
 
@@ -138,6 +141,73 @@ pub fn walk(dirs: &[PathBuf], exclude: &[String]) -> Vec<FileEntry> {
                 is_dir,
                 is_empty,
             });
+        }
+    }
+
+    entries
+}
+
+/// Like `walk()` but calls `on_entry` after each file is discovered (for live progress).
+///
+/// The `counter` is incremented atomically after each entry so that a polling
+/// thread can read the current count without blocking.
+pub fn walk_with_progress<F>(
+    dirs: &[PathBuf],
+    exclude: &[String],
+    counter: Arc<AtomicUsize>,
+    mut on_entry: F,
+) -> Vec<FileEntry>
+where
+    F: FnMut(usize),
+{
+    let mut entries = Vec::new();
+
+    for root in dirs {
+        for result in WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| {
+                let p = e.path();
+                !is_hard_excluded(p) && !is_user_excluded(p, exclude)
+            })
+            .flatten()
+        {
+            let path = result.path().to_path_buf();
+
+            if path == *root {
+                continue;
+            }
+
+            let meta = match result.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            let is_dir = meta.is_dir();
+            let size = if is_dir { 0 } else { meta.len() };
+            let accessed = meta.accessed().ok();
+            let modified = meta.modified().ok();
+
+            let is_empty = if is_dir {
+                std::fs::read_dir(&path)
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(false)
+            } else {
+                size == 0
+            };
+
+            entries.push(FileEntry {
+                path,
+                size,
+                accessed,
+                modified,
+                hash: None,
+                is_dir,
+                is_empty,
+            });
+
+            let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
+            on_entry(n);
         }
     }
 

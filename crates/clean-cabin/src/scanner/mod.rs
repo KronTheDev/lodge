@@ -5,4 +5,5 @@ pub mod heuristics;
 pub mod receipt_guard;
 pub mod walker;
 
-pub use walker::walk;
+#[allow(unused_imports)]
+pub use walker::{walk, walk_with_progress};

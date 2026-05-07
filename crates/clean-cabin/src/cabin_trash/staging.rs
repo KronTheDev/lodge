@@ -1,6 +1,6 @@
 //! Staging area management — move, list, recover, and purge staged files.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{NaiveDate, Utc};
@@ -55,21 +55,12 @@ pub fn staging_root() -> PathBuf {
     }
 }
 
-/// Move selected files to `staging_root()/<session_id>/files/`.
-///
-/// The manifest is written **before** any files are moved, so recovery is
-/// always possible even if the process is interrupted mid-way.
-pub fn stage_files(files: &[&FlaggedFile], session_id: &str) -> Result<StagingManifest> {
-    let session_dir = staging_root().join(session_id);
-    let files_dir = session_dir.join("files");
-
-    std::fs::create_dir_all(&files_dir)
-        .with_context(|| format!("couldn't create staging directory {}", files_dir.display()))?;
-
+/// Build the list of `StagedFile` entries from flagged files (shared by both
+/// `stage_files` and `init_session`).
+fn build_staged_list(files: &[&FlaggedFile]) -> Vec<StagedFile> {
     let now = Utc::now().to_rfc3339();
 
-    // Build the manifest before moving anything.
-    let staged: Vec<StagedFile> = files
+    files
         .iter()
         .enumerate()
         .map(|(i, f)| {
@@ -105,41 +96,84 @@ pub fn stage_files(files: &[&FlaggedFile], session_id: &str) -> Result<StagingMa
                 staged_at: now.clone(),
             }
         })
-        .collect();
+        .collect()
+}
+
+/// Create the session directory and write the manifest.
+///
+/// Returns `(session_dir, manifest)`. Must be called before any
+/// `stage_one_file()` calls. The manifest is written before any files are
+/// moved, so recovery is always possible even if the process is interrupted.
+pub fn init_session(files: &[&FlaggedFile], session_id: &str) -> Result<(PathBuf, StagingManifest)> {
+    let session_dir = staging_root().join(session_id);
+    let files_dir = session_dir.join("files");
+
+    std::fs::create_dir_all(&files_dir)
+        .with_context(|| format!("couldn't create staging directory {}", files_dir.display()))?;
+
+    let staged = build_staged_list(files);
 
     let manifest = StagingManifest {
         session_id: session_id.to_string(),
-        files: staged.clone(),
+        files: staged,
     };
 
-    // Write manifest first.
+    // Write manifest before any file moves.
     let manifest_path = session_dir.join("manifest.json");
     let manifest_json =
         serde_json::to_string_pretty(&manifest).context("couldn't serialise staging manifest")?;
     std::fs::write(&manifest_path, manifest_json)
         .with_context(|| format!("couldn't write manifest {}", manifest_path.display()))?;
 
-    // Now move each file.
-    for sf in &staged {
-        let dest = files_dir.join(&sf.staged_name);
-        if let Err(e) = std::fs::rename(&sf.original_path, &dest) {
-            // Cross-device move — fall back to copy + delete.
-            if e.kind() == std::io::ErrorKind::CrossesDevices
-                || e.raw_os_error() == Some(17) // EXDEV on Linux
-            {
-                std::fs::copy(&sf.original_path, &dest).with_context(|| {
-                    format!(
-                        "couldn't copy {} to {}",
-                        sf.original_path.display(),
-                        dest.display()
-                    )
-                })?;
-                std::fs::remove_file(&sf.original_path).with_context(|| {
-                    format!("couldn't remove original {}", sf.original_path.display())
-                })?;
-            }
-            // For other errors, skip silently (file may already be gone).
+    Ok((session_dir, manifest))
+}
+
+/// Stage a single file given its entry in the manifest.
+///
+/// Moves `staged.original_path` to `session_dir/files/staged.staged_name`.
+/// Returns the number of bytes freed (the file's size on disk before the move).
+pub fn stage_one_file(session_dir: &Path, staged: &StagedFile) -> Result<u64> {
+    let files_dir = session_dir.join("files");
+    let dest = files_dir.join(&staged.staged_name);
+
+    let bytes = staged.size;
+
+    if let Err(e) = std::fs::rename(&staged.original_path, &dest) {
+        // Cross-device move — fall back to copy + delete.
+        if e.kind() == std::io::ErrorKind::CrossesDevices
+            || e.raw_os_error() == Some(17) // EXDEV on Linux
+        {
+            std::fs::copy(&staged.original_path, &dest).with_context(|| {
+                format!(
+                    "couldn't copy {} to {}",
+                    staged.original_path.display(),
+                    dest.display()
+                )
+            })?;
+            std::fs::remove_file(&staged.original_path).with_context(|| {
+                format!("couldn't remove original {}", staged.original_path.display())
+            })?;
         }
+        // For other errors (file may already be gone), continue silently.
+    }
+
+    Ok(bytes)
+}
+
+/// Move selected files to `staging_root()/<session_id>/files/` in a single call.
+///
+/// Convenience wrapper around `init_session` + `stage_one_file`. Prefer the
+/// two-step API for live TUI progress.
+///
+/// The manifest is written **before** any files are moved, so recovery is
+/// always possible even if the process is interrupted mid-way.
+#[allow(dead_code)]
+pub fn stage_files(files: &[&FlaggedFile], session_id: &str) -> Result<StagingManifest> {
+    let (session_dir, manifest) = init_session(files, session_id)?;
+
+    // Move each file.
+    for sf in &manifest.files {
+        let _ = stage_one_file(&session_dir, sf);
     }
 
     Ok(manifest)
@@ -282,4 +316,3 @@ pub fn expiry_date(session_id: &str, retention_days: u32) -> Option<NaiveDate> {
     let date = NaiveDate::parse_from_str(date_part, "%Y-%m-%d").ok()?;
     date.checked_add_days(chrono::Days::new(retention_days as u64))
 }
-
