@@ -927,6 +927,13 @@ pub fn run() -> anyhow::Result<()> {
                                 register_active = false;
                             }
 
+                            // ── Clr: clear chat history ──────────────────────────────────
+                            if trimmed == "clr" {
+                                history.clear();
+                                history_scroll = 0;
+                                continue;
+                            }
+
                             // ── Active: add probe result to band ────────────────────────
                             if trimmed == "active" || trimmed.starts_with("active ") {
                                 let args_str = trimmed.trim_start_matches("active").trim().to_string();
@@ -2104,6 +2111,7 @@ fn detect_trigger(words: &[&str]) -> Option<(String, CmdKind, Option<String>)> {
         ["active"]    => Some(("active".into(),   CmdKind::Command, None)),
         ["ollama"]    => Some(("ollama".into(),   CmdKind::Command, None)),
         ["ext"]       => Some(("ext".into(),      CmdKind::Command, None)),
+        ["clr"]       => Some(("clr".into(),      CmdKind::Command, None)),
         ["switch", "to"]       => Some(("use".into(),            CmdKind::Command, msyn(words, "use"))),
         ["update", "rulesets"] => Some(("update-rulesets".into(), CmdKind::Command, None)),
 
@@ -2190,7 +2198,7 @@ fn ghost_completion(input: &str, ext_ids: &[String]) -> Option<String> {
     }
     const BUILTIN: &[&str] = &[
         "help", "list", "history", "scan", "expand",
-        "verify", "use", "register", "active", "ollama", "ext",
+        "verify", "use", "register", "active", "ollama", "ext", "clr",
     ];
     let mut all: Vec<&str> = BUILTIN.to_vec();
     let ext_refs: Vec<&str> = ext_ids.iter().map(String::as_str).collect();
