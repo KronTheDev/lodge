@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -293,6 +293,9 @@ fn run_dir_prompt(
         let Ok(Event::Key(key)) = event::read() else {
             continue;
         };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
 
         match (key.code, key.modifiers) {
             (KeyCode::Esc, _)
@@ -407,9 +410,10 @@ fn run_scan_progress(
         // Check for Ctrl+C / Esc while scanning.
         if event::poll(Duration::from_millis(0))? {
             if let Event::Key(key) = event::read()? {
-                if matches!(key.code, KeyCode::Esc)
-                    || (key.code == KeyCode::Char('c')
-                        && key.modifiers == KeyModifiers::CONTROL)
+                if key.kind == KeyEventKind::Press
+                    && (matches!(key.code, KeyCode::Esc)
+                        || (key.code == KeyCode::Char('c')
+                            && key.modifiers == KeyModifiers::CONTROL))
                 {
                     // We can't cancel the thread easily; just return empty.
                     return Ok(Vec::new());
@@ -439,6 +443,9 @@ fn run_report_loop(
         let Event::Key(key) = event::read()? else {
             continue;
         };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
 
         match (key.code, key.modifiers) {
             (KeyCode::Char('q') | KeyCode::Char('Q'), _) | (KeyCode::Esc, _) => {
@@ -510,13 +517,15 @@ fn run_confirmation_screen(
         }
 
         if let Event::Key(key) = event::read()? {
-            match key.code {
-                KeyCode::Enter => return Ok(true),
-                KeyCode::Esc => return Ok(false),
-                KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
-                    return Ok(false);
+            if key.kind == KeyEventKind::Press {
+                match key.code {
+                    KeyCode::Enter => return Ok(true),
+                    KeyCode::Esc => return Ok(false),
+                    KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
+                        return Ok(false);
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
@@ -562,8 +571,8 @@ fn run_staging_sequence(
     // Wait for any keypress.
     loop {
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(_) = event::read()? {
-                break;
+            if let Event::Key(k) = event::read()? {
+                if k.kind == KeyEventKind::Press { break; }
             }
         }
     }
@@ -605,8 +614,8 @@ fn run_message_screen(
 
     loop {
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(_) = event::read()? {
-                break;
+            if let Event::Key(k) = event::read()? {
+                if k.kind == KeyEventKind::Press { break; }
             }
         }
     }
@@ -669,6 +678,9 @@ fn cmd_recover(recover_all: bool) -> Result<()> {
         let Ok(Event::Key(key)) = event::read() else {
             continue;
         };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
 
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
@@ -760,6 +772,9 @@ fn cmd_purge(cutoff: Option<chrono::NaiveDate>) -> Result<()> {
                 let Ok(Event::Key(key)) = event::read() else {
                     continue;
                 };
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
 
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
