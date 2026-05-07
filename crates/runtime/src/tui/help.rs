@@ -1,7 +1,7 @@
 // Card-based help overlay.
 //
 // Renders a centred card over whatever is currently on screen.
-// Four cards, navigated with Left/Right arrows or Tab.
+// Cards navigated with Left/Right arrows or Tab.
 // Q or Esc closes the overlay and returns to the command bar.
 
 use ratatui::{
@@ -12,15 +12,17 @@ use ratatui::{
     Frame,
 };
 
+use crate::engine::extensions::RegistryEntry;
 use super::palette;
 
 /// Total number of help cards.
-pub const TOTAL_CARDS: usize = 6;
+pub const TOTAL_CARDS: usize = 7;
 
 /// Renders the help card overlay centred in the terminal.
 ///
 /// `page` is 0-indexed; wraps at [`TOTAL_CARDS`].
-pub fn render(page: usize, frame: &mut Frame) {
+/// `ext_entries` is passed through for the dynamic extensions card (page 6).
+pub fn render(page: usize, ext_entries: &[RegistryEntry], frame: &mut Frame) {
     let area = frame.area();
 
     let card_w = 78u16.min(area.width.saturating_sub(2));
@@ -70,7 +72,12 @@ pub fn render(page: usize, frame: &mut Frame) {
         height: 1,
     };
 
-    frame.render_widget(Paragraph::new(card_content(page)), content_area);
+    let content_lines = if page == 6 {
+        card_extensions(ext_entries)
+    } else {
+        card_content_static(page)
+    };
+    frame.render_widget(Paragraph::new(content_lines), content_area);
 
     let sep = "─".repeat(inner.width as usize);
     frame.render_widget(
@@ -97,6 +104,7 @@ fn card_title(page: usize) -> &'static str {
         3 => "ask — your machine",
         4 => "band & commands",
         5 => "ai settings",
+        6 => "extensions",
         _ => "help",
     }
 }
@@ -147,7 +155,7 @@ fn blank() -> Line<'static> {
     Line::from("")
 }
 
-fn card_content(page: usize) -> Vec<Line<'static>> {
+fn card_content_static(page: usize) -> Vec<Line<'static>> {
     match page {
         0 => card_install(),
         1 => card_discover(),
@@ -292,7 +300,7 @@ fn card_band() -> Vec<Line<'static>> {
 
 // ── Card 5 — ai settings ──────────────────────────────────────────────────────
 
-fn card_ai() -> Vec<Line<'static>> {
+pub fn card_ai() -> Vec<Line<'static>> {
     vec![
         blank(),
         head("  provider resolution: saved config → env vars → Ollama → none"),
@@ -322,4 +330,77 @@ fn card_ai() -> Vec<Line<'static>> {
         row("!ollama remove <model>    ", "remove a pulled model"),
         row("!ollama models            ", "list suggested models with RAM requirements"),
     ]
+}
+
+// ── Card 6 — extensions (dynamic) ────────────────────────────────────────────
+
+fn card_extensions(entries: &[RegistryEntry]) -> Vec<Line<'_>> {
+    let mut lines: Vec<Line<'_>> = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled("!ext", Style::default().fg(palette::ACCENT)),
+            Span::styled(
+                "   open the extension browser — select, inspect, navigate sub-pages",
+                Style::default().fg(palette::TEXT_DIM),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "─".repeat(70),
+            Style::default().fg(palette::BORDER),
+        )),
+        Line::from(""),
+    ];
+
+    if entries.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no extensions available — check your connection",
+            Style::default().fg(palette::TEXT_DIM),
+        )));
+        return lines;
+    }
+
+    lines.push(Line::from(Span::styled(
+        format!("  {} extension{} in registry", entries.len(),
+            if entries.len() == 1 { "" } else { "s" }),
+        Style::default().fg(palette::TEXT_DIM),
+    )));
+    lines.push(Line::from(""));
+
+    for entry in entries {
+        let status_style = Style::default().fg(match entry.status.as_str() {
+            "stable"  => palette::SUCCESS,
+            "preview" => palette::WARNING,
+            _         => palette::TEXT_DIM,
+        });
+
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                format!("!{:<14}", entry.command_alias()),
+                Style::default().fg(palette::ACCENT),
+            ),
+            Span::styled(&entry.name, Style::default().fg(palette::TEXT)),
+            Span::raw("  "),
+            Span::styled(format!("[{}]", entry.status), status_style),
+        ]));
+
+        let desc_chars: Vec<char> = entry.description.chars().collect();
+        let max_desc = 60usize;
+        let desc: String = if desc_chars.len() <= max_desc {
+            entry.description.clone()
+        } else {
+            desc_chars[..max_desc.saturating_sub(1)].iter().collect::<String>() + "…"
+        };
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("{:<16}", ""),  Style::default()),
+            Span::styled(desc, Style::default().fg(palette::TEXT_DIM)),
+        ]));
+
+        lines.push(Line::from(""));
+    }
+
+    lines
 }

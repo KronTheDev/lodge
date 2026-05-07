@@ -1,5 +1,6 @@
 pub mod bar;
 pub mod console;
+pub mod ext_browser;
 pub mod flashcard;
 pub mod help;
 pub mod onboarding;

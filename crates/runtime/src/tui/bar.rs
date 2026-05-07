@@ -21,7 +21,7 @@ use ratatui::{
 
 use lodge_brain::{Brain, Command};
 
-use super::{flashcard, help, onboarding, palette, splash};
+use super::{ext_browser, flashcard, help, onboarding, palette, splash};
 use crate::engine::attester;
 
 // ── Input mode types ──────────────────────────────────────────────────────────
@@ -469,13 +469,12 @@ pub fn run() -> anyhow::Result<()> {
 
     // Build extension alias list from cached registry for autocomplete.
     // Uses whatever is in the local cache right now; updated next session.
-    let ext_ids: Vec<String> = {
-        let (entries, _) = crate::engine::extensions::fetch_registry();
-        entries.into_iter()
-            .filter(|e| e.status != "coming-soon")
-            .map(|e| e.command_alias().to_string())
-            .collect()
-    };
+    let (all_ext_entries, _) = crate::engine::extensions::fetch_registry();
+    let ext_entries: Vec<crate::engine::extensions::RegistryEntry> = all_ext_entries
+        .into_iter()
+        .filter(|e| e.status != "coming-soon")
+        .collect();
+    let ext_ids: Vec<String> = ext_entries.iter().map(|e| e.command_alias().to_string()).collect();
 
     // Drain any key events that arrived before raw mode was fully active,
     // so they don't accidentally trigger the first screen.
@@ -519,6 +518,8 @@ pub fn run() -> anyhow::Result<()> {
     let mut thinking = false;
     // Help overlay: Some(page) when open, None when closed
     let mut help_page: Option<usize> = None;
+    // Extension browser overlay
+    let mut ext_overlay: Option<ext_browser::ExtBrowserState> = None;
     // Last probe result — fed to `expand` when the user asks to go deeper
     let mut last_probe: Option<String> = None;
     let mut cursor: usize = 0;             // char-index cursor in `input`
@@ -617,7 +618,10 @@ pub fn run() -> anyhow::Result<()> {
                 f,
             );
             if let Some(page) = help_page {
-                help::render(page, f);
+                help::render(page, &ext_entries, f);
+            }
+            if let Some(ref state) = ext_overlay {
+                ext_browser::render(state, f);
             }
         })?;
 
@@ -716,6 +720,51 @@ pub fn run() -> anyhow::Result<()> {
                         }
                         KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
                             help_page = None;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // ── Extension browser overlay key handling ─────────────────
+                if let Some(ref mut state) = ext_overlay {
+                    match key.code {
+                        // List mode navigation
+                        KeyCode::Up if !state.in_detail && state.selected > 0 => {
+                            state.selected -= 1;
+                        }
+                        KeyCode::Down
+                            if !state.in_detail
+                                && state.selected + 1 < state.entries.len() =>
+                        {
+                            state.selected += 1;
+                        }
+                        KeyCode::Enter if !state.in_detail => {
+                            state.in_detail = true;
+                            state.sub_page = 0;
+                        }
+                        // Detail sub-page navigation
+                        KeyCode::Left if state.in_detail => {
+                            let total = state.sub_page_count();
+                            state.sub_page = if state.sub_page == 0 {
+                                total - 1
+                            } else {
+                                state.sub_page - 1
+                            };
+                        }
+                        KeyCode::Right | KeyCode::Tab if state.in_detail => {
+                            let total = state.sub_page_count();
+                            state.sub_page = (state.sub_page + 1) % total;
+                        }
+                        // Back from detail to list
+                        KeyCode::Esc | KeyCode::Char('b') | KeyCode::Char('B')
+                            if state.in_detail =>
+                        {
+                            state.in_detail = false;
+                        }
+                        // Close browser entirely
+                        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                            ext_overlay = None;
                         }
                         _ => {}
                     }
@@ -1063,6 +1112,18 @@ pub fn run() -> anyhow::Result<()> {
                                 continue;
                             }
 
+                            // ── Extension browser ─────────────────────────────────────────
+                            if trimmed == "ext" {
+                                if ext_entries.is_empty() {
+                                    history.push((trimmed, "no extensions available.".into()));
+                                } else {
+                                    ext_overlay = Some(ext_browser::ExtBrowserState::new(
+                                        ext_entries.clone(),
+                                    ));
+                                }
+                                continue;
+                            }
+
                             // ── Help: route to the appropriate card ──────────────────────
                             if trimmed == "help" || trimmed.starts_with("help ") {
                                 let topic = trimmed.trim_start_matches("help").trim().to_string();
@@ -1361,6 +1422,7 @@ fn handle_command(brain: &mut Brain, input: &str, ext_ids: &[String]) -> String 
                 }
             }
             help.push_str("\n\nbuilt-in tools:");
+            help.push_str("\n  !ext                open the extension browser");
             help.push_str("\n  !ollama             manage local Ollama models");
             help.push_str("\n  !scan               full system probe battery");
             help.push_str("\n  !register <path>    probe a directory");
@@ -2040,6 +2102,8 @@ fn detect_trigger(words: &[&str]) -> Option<(String, CmdKind, Option<String>)> {
         ["pin"]       => Some(("use".into(),      CmdKind::Command, Some("pin".into()))),
         ["register"]  => Some(("register".into(), CmdKind::Command, None)),
         ["active"]    => Some(("active".into(),   CmdKind::Command, None)),
+        ["ollama"]    => Some(("ollama".into(),   CmdKind::Command, None)),
+        ["ext"]       => Some(("ext".into(),      CmdKind::Command, None)),
         ["switch", "to"]       => Some(("use".into(),            CmdKind::Command, msyn(words, "use"))),
         ["update", "rulesets"] => Some(("update-rulesets".into(), CmdKind::Command, None)),
 
@@ -2126,7 +2190,7 @@ fn ghost_completion(input: &str, ext_ids: &[String]) -> Option<String> {
     }
     const BUILTIN: &[&str] = &[
         "help", "list", "history", "scan", "expand",
-        "verify", "use", "register", "active", "ollama",
+        "verify", "use", "register", "active", "ollama", "ext",
     ];
     let mut all: Vec<&str> = BUILTIN.to_vec();
     let ext_refs: Vec<&str> = ext_ids.iter().map(String::as_str).collect();
@@ -2180,6 +2244,7 @@ fn help_page_for_topic(topic: &str) -> usize {
         "tools" | "dev" | "developer" => 2,
         "machine" | "system" | "hardware" | "specs" => 3,
         "discover" | "search" | "find" | "inspect" | "info" => 1,
+        "extensions" | "ext" | "extension" | "plugins" => 6,
         "install" | "manage" | "update" | "rollback" | "uninstall" => 0,
         _ => 0,
     }

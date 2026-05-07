@@ -34,6 +34,15 @@ pub const REGISTRY_SCHEMA: u32 = 1;
 
 // ── Registry schema ───────────────────────────────────────────────────────────
 
+/// A command entry for an extension, shown in the extension browser sub-pages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtCmd {
+    /// Usage string, e.g. `"!clean <path>"`.
+    pub usage: String,
+    /// One-sentence description of what the command does.
+    pub description: String,
+}
+
 /// A single extension in the registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryEntry {
@@ -58,6 +67,9 @@ pub struct RegistryEntry {
     /// digest does not match exactly.
     #[serde(default)]
     pub sha256: Option<String>,
+    /// Optional list of sub-commands shown in the extension browser detail view.
+    #[serde(default)]
+    pub commands: Vec<ExtCmd>,
 }
 
 impl RegistryEntry {
