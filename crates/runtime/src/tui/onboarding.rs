@@ -659,7 +659,7 @@ fn render_extensions(state: &State, area: Rect, frame: &mut Frame) {
     let mut lines: Vec<Line> = vec![
         Line::from(""),
         txt("select what to install alongside Lodge."),
-        dim("you can change this later with  `lodge ext`"),
+        dim("you can change this later with  `!ext`"),
         Line::from(""),
         sep(area.width),
         Line::from(""),
@@ -697,6 +697,7 @@ fn render_extensions(state: &State, area: Rect, frame: &mut Frame) {
             };
 
             // First line: cursor + checkbox + name + badge
+            // Prefix: "  {cursor} [{check}] " = 9 chars; suffix: "  {badge}" = 2 + badge len.
             let check_style = if entry.selectable {
                 Style::default().fg(palette::ACCENT)
             } else {
@@ -709,22 +710,45 @@ fn render_extensions(state: &State, area: Rect, frame: &mut Frame) {
                 Style::default().fg(palette::TEXT_DIM)
             };
 
+            let badge_str   = badge_label.to_string();
+            let prefix_w    = 9usize; // "  {cursor} [{check}] "
+            let suffix_w    = 2 + badge_str.len(); // "  {badge}"
+            let name_max    = (area.width as usize).saturating_sub(prefix_w + suffix_w);
+            let name_fitted = {
+                let chars: Vec<char> = entry.manifest.name.chars().collect();
+                if chars.len() <= name_max {
+                    entry.manifest.name.clone()
+                } else {
+                    chars[..name_max.saturating_sub(1)].iter().collect::<String>() + "…"
+                }
+            };
+
             lines.push(Line::from(vec![
                 Span::styled(format!("  {cursor} "), Style::default().fg(palette::ACCENT)),
                 Span::styled(format!("[{check}] "), check_style),
-                Span::styled(entry.manifest.name.clone(), name_style),
+                Span::styled(name_fitted, name_style),
                 Span::raw("  "),
-                Span::styled(badge_label.to_string(), badge_style),
+                Span::styled(badge_str, badge_style),
             ]));
 
-            // Second line: description
+            // Second line: description — indent 7 spaces, clip to panel width.
             let desc_style = if entry.selectable {
                 Style::default().fg(palette::TEXT_DIM)
             } else {
                 Style::default().fg(palette::BORDER)
             };
+            let desc_indent = 7usize;
+            let desc_max    = (area.width as usize).saturating_sub(desc_indent);
+            let desc_fitted = {
+                let chars: Vec<char> = entry.manifest.description.chars().collect();
+                if chars.len() <= desc_max {
+                    entry.manifest.description.clone()
+                } else {
+                    chars[..desc_max.saturating_sub(1)].iter().collect::<String>() + "…"
+                }
+            };
             lines.push(Line::from(Span::styled(
-                format!("       {}", entry.manifest.description),
+                format!("       {desc_fitted}"),
                 desc_style,
             )));
 

@@ -7,6 +7,8 @@
 // Sub-pages per extension:
 //   0  overview  — name, version, description, status, command
 //   1  commands  — list of sub-commands (from RegistryEntry.commands)
+//
+// All dynamic text is clipped to the enclosing Rect width before rendering.
 
 use ratatui::{
     layout::{Alignment, Margin, Rect},
@@ -44,6 +46,20 @@ impl ExtBrowserState {
     }
 }
 
+// ── Fit helper ────────────────────────────────────────────────────────────────
+
+/// Truncate `s` to `max` visible characters, appending `…` if clipped.
+/// `max = 0` returns an empty string.
+fn fit(s: &str, max: usize) -> String {
+    if max == 0 { return String::new(); }
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        s.to_string()
+    } else {
+        chars[..max.saturating_sub(1)].iter().collect::<String>() + "…"
+    }
+}
+
 // ── Render ────────────────────────────────────────────────────────────────────
 
 /// Render the extension browser overlay into the current frame.
@@ -59,13 +75,13 @@ pub fn render(state: &ExtBrowserState, frame: &mut Frame) {
     frame.render_widget(Clear, card);
 
     let title_text = if state.in_detail {
-        format!(" {} ", state.entries[state.selected].name)
+        // Fit title to card width minus borders and padding.
+        let max_title = card_w.saturating_sub(6) as usize;
+        format!(" {} ", fit(&state.entries[state.selected].name, max_title))
     } else {
         " extensions ".to_string()
     };
-    let title_line = Line::from(vec![
-        Span::styled(title_text, Style::default().fg(palette::ACCENT)),
-    ]);
+    let title_line = Line::from(Span::styled(title_text, Style::default().fg(palette::ACCENT)));
 
     let block = Block::default()
         .title(title_line)
@@ -80,23 +96,21 @@ pub fn render(state: &ExtBrowserState, frame: &mut Frame) {
     // Bottom 2 rows: separator + nav bar.
     let content_h = inner.height.saturating_sub(2);
     let content_area = Rect { height: content_h, ..inner };
-    let sep_area    = Rect { x: inner.x, y: inner.y + content_h,     width: inner.width, height: 1 };
-    let nav_area    = Rect { x: inner.x, y: inner.y + content_h + 1, width: inner.width, height: 1 };
+    let sep_area = Rect { x: inner.x, y: inner.y + content_h,     width: inner.width, height: 1 };
+    let nav_area = Rect { x: inner.x, y: inner.y + content_h + 1, width: inner.width, height: 1 };
 
-    // Separator.
+    // Separator — always fills exactly the inner width.
     let sep = "─".repeat(inner.width as usize);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(sep, Style::default().fg(palette::BORDER)))),
         sep_area,
     );
 
-    // Nav bar.
     frame.render_widget(
         Paragraph::new(nav_line(state)).alignment(Alignment::Center),
         nav_area,
     );
 
-    // Content.
     if state.in_detail {
         render_detail(state, frame, content_area);
     } else {
@@ -108,6 +122,7 @@ pub fn render(state: &ExtBrowserState, frame: &mut Frame) {
 
 fn render_list(state: &ExtBrowserState, frame: &mut Frame, area: Rect) {
     let padded = area.inner(Margin { horizontal: 2, vertical: 1 });
+    let w = padded.width as usize;
 
     let mut lines: Vec<Line<'_>> = vec![
         Line::from(Span::styled(
@@ -132,43 +147,46 @@ fn render_list(state: &ExtBrowserState, frame: &mut Frame, area: Rect) {
         } else {
             Style::default().fg(palette::TEXT)
         };
-
-        let alias = format!("!{}", entry.command_alias());
         let alias_style = if selected {
             Style::default().fg(palette::ACCENT)
         } else {
             Style::default().fg(palette::TEXT_DIM)
         };
-
         let status_style = Style::default().fg(match entry.status.as_str() {
             "stable"  => palette::SUCCESS,
             "preview" => palette::WARNING,
             _         => palette::TEXT_DIM,
         });
 
-        // Name row
+        // Right side of name row: "  v{version}  !{alias}  [{status}]"
+        // Reserve space for these fields so name doesn't collide.
+        let alias    = format!("!{}", entry.command_alias());
+        let version  = format!("v{}", entry.version);
+        let status   = format!("[{}]", entry.status);
+        // fixed overhead: indicator(2) + "  "(2) + "  "(2) + "  "(2) = 8
+        // plus the version, alias, status widths
+        let right_w  = 2 + version.len() + 2 + alias.len() + 2 + status.len();
+        let name_max = w.saturating_sub(2 + right_w); // 2 = indicator width
+        let name     = fit(&entry.name, name_max);
+
+        // Name row — all pieces on one line.
         lines.push(Line::from(vec![
             indicator.clone(),
-            Span::styled(&entry.name, name_style),
+            Span::styled(name, name_style),
             Span::raw("  "),
-            Span::styled(format!("v{}", entry.version), Style::default().fg(palette::TEXT_DIM)),
+            Span::styled(version, Style::default().fg(palette::TEXT_DIM)),
             Span::raw("  "),
             Span::styled(alias, alias_style),
             Span::raw("  "),
-            Span::styled(format!("[{}]", entry.status), status_style),
+            Span::styled(status, status_style),
         ]));
 
-        // Description row (indented under name)
-        let desc_chars: Vec<char> = entry.description.chars().collect();
-        let max_desc = area.width.saturating_sub(8) as usize;
-        let desc: String = if desc_chars.len() <= max_desc {
-            entry.description.clone()
-        } else {
-            desc_chars[..max_desc.saturating_sub(1)].iter().collect::<String>() + "…"
-        };
+        // Description row — indented, clipped to panel width.
+        let indent = 2usize; // "  "
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(desc, Style::default().fg(palette::TEXT_DIM)),
+            Span::styled(fit(&entry.description, w.saturating_sub(indent)),
+                Style::default().fg(palette::TEXT_DIM)),
         ]));
 
         lines.push(Line::from(""));
@@ -183,7 +201,6 @@ fn render_detail(state: &ExtBrowserState, frame: &mut Frame, area: Rect) {
     let entry = &state.entries[state.selected];
     let padded = area.inner(Margin { horizontal: 2, vertical: 1 });
 
-    // Sub-page dots above content.
     let total = state.sub_page_count();
     let dots_area = Rect { height: 1, ..padded };
     let content_area = Rect {
@@ -192,7 +209,6 @@ fn render_detail(state: &ExtBrowserState, frame: &mut Frame, area: Rect) {
         ..padded
     };
 
-    // Dot indicator.
     if total > 1 {
         let mut dots: Vec<Span<'_>> = Vec::new();
         for i in 0..total {
@@ -209,42 +225,58 @@ fn render_detail(state: &ExtBrowserState, frame: &mut Frame, area: Rect) {
         );
     }
 
+    let w = padded.width as usize;
     let lines: Vec<Line<'_>> = match state.sub_page {
-        0 => detail_overview(entry),
-        1 => detail_commands(entry),
+        0 => detail_overview(entry, w),
+        1 => detail_commands(entry, w),
         _ => vec![],
     };
 
     frame.render_widget(Paragraph::new(lines), content_area);
 }
 
-fn detail_overview(entry: &RegistryEntry) -> Vec<Line<'_>> {
-    let lbl = |k: &'static str| Span::styled(format!("{k:<14}"), Style::default().fg(palette::TEXT_DIM));
+fn detail_overview(entry: &RegistryEntry, w: usize) -> Vec<Line<'_>> {
+    // Label column is 14 chars; value gets the rest.
+    const LABEL_W: usize = 14;
+    let val_w = w.saturating_sub(LABEL_W);
+
+    let lbl = |k: &'static str| Span::styled(format!("{k:<LABEL_W$}"), Style::default().fg(palette::TEXT_DIM));
     let val = |v: String| Span::styled(v, Style::default().fg(palette::TEXT));
+
+    // Name + version on one line; name gets available width after version.
+    let version  = format!("v{}", entry.version);
+    let name_max = w.saturating_sub(2 + version.len()); // 2 = "  " separator
+    let name     = fit(&entry.name, name_max);
 
     let mut lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled(&entry.name, Style::default().fg(palette::TEXT).add_modifier(Modifier::BOLD)),
+            Span::styled(name, Style::default().fg(palette::TEXT).add_modifier(Modifier::BOLD)),
             Span::raw("  "),
-            Span::styled(format!("v{}", entry.version), Style::default().fg(palette::TEXT_DIM)),
+            Span::styled(version, Style::default().fg(palette::TEXT_DIM)),
         ]),
+        Line::from(""),
+        // Description — full panel width.
+        Line::from(Span::styled(fit(&entry.description, w), Style::default().fg(palette::TEXT_DIM))),
+        Line::from(""),
+        Line::from(Span::styled("─".repeat(w), Style::default().fg(palette::BORDER))),
         Line::from(""),
         Line::from(vec![
-            Span::styled(&entry.description, Style::default().fg(palette::TEXT_DIM)),
+            lbl("command"),
+            val(fit(&format!("!{}", entry.command_alias()), val_w)),
         ]),
-        Line::from(""),
-        Line::from(Span::styled("─".repeat(50), Style::default().fg(palette::BORDER))),
-        Line::from(""),
-        Line::from(vec![lbl("command"), val(format!("!{}", entry.command_alias()))]),
-        Line::from(vec![lbl("status"),  val(entry.status.clone())]),
+        Line::from(vec![
+            lbl("status"),
+            val(fit(&entry.status, val_w)),
+        ]),
     ];
 
     if let Some(url) = &entry.payload_url {
         if !url.is_empty() {
-            let short: String = url.chars().take(46).collect();
-            let short = if url.len() > 46 { format!("{short}…") } else { short };
-            lines.push(Line::from(vec![lbl("source"), val(short)]));
+            lines.push(Line::from(vec![
+                lbl("source"),
+                val(fit(url, val_w)),
+            ]));
         }
     }
 
@@ -260,16 +292,21 @@ fn detail_overview(entry: &RegistryEntry) -> Vec<Line<'_>> {
     lines
 }
 
-fn detail_commands(entry: &RegistryEntry) -> Vec<Line<'_>> {
+fn detail_commands(entry: &RegistryEntry, w: usize) -> Vec<Line<'_>> {
     if entry.commands.is_empty() {
         return vec![
             Line::from(""),
             Line::from(Span::styled(
-                "  no command list — run !<alias> help for details",
+                fit("  no command list — run !<alias> help for details", w),
                 Style::default().fg(palette::TEXT_DIM),
             )),
         ];
     }
+
+    // Usage column: 22 chars + 2 indent = 24 reserved; description gets rest.
+    const USAGE_W: usize  = 22;
+    const INDENT: usize   = 2;
+    let desc_w = w.saturating_sub(INDENT + USAGE_W);
 
     let mut lines = vec![
         Line::from(""),
@@ -280,8 +317,14 @@ fn detail_commands(entry: &RegistryEntry) -> Vec<Line<'_>> {
     for cmd in &entry.commands {
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(format!("{:<22}", cmd.usage), Style::default().fg(palette::ACCENT)),
-            Span::styled(&cmd.description, Style::default().fg(palette::TEXT_DIM)),
+            Span::styled(
+                format!("{:<USAGE_W$}", fit(&cmd.usage, USAGE_W)),
+                Style::default().fg(palette::ACCENT),
+            ),
+            Span::styled(
+                fit(&cmd.description, desc_w),
+                Style::default().fg(palette::TEXT_DIM),
+            ),
         ]));
     }
 
@@ -310,8 +353,6 @@ fn nav_line(state: &ExtBrowserState) -> Line<'_> {
         spans.push(Span::styled("[B] back  [Q] close", dim));
         Line::from(spans)
     } else {
-        Line::from(vec![
-            Span::styled("[↑][↓] select  [Enter] open  [Q] close", dim),
-        ])
+        Line::from(Span::styled("[↑][↓] select  [Enter] open  [Q] close", dim))
     }
 }

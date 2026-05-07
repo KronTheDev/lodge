@@ -73,7 +73,7 @@ pub fn render(page: usize, ext_entries: &[RegistryEntry], frame: &mut Frame) {
     };
 
     let content_lines = if page == 6 {
-        card_extensions(ext_entries)
+        card_extensions(ext_entries, inner.width)
     } else {
         card_content_static(page)
     };
@@ -334,28 +334,40 @@ pub fn card_ai() -> Vec<Line<'static>> {
 
 // ── Card 6 — extensions (dynamic) ────────────────────────────────────────────
 
-fn card_extensions(entries: &[RegistryEntry]) -> Vec<Line<'_>> {
+fn fit_str(s: &str, max: usize) -> String {
+    if max == 0 { return String::new(); }
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        s.to_string()
+    } else {
+        chars[..max.saturating_sub(1)].iter().collect::<String>() + "…"
+    }
+}
+
+fn card_extensions(entries: &[RegistryEntry], width: u16) -> Vec<Line<'_>> {
+    let w = width as usize;
+
+    // Header row: "  !ext   <description>" — clip description to fit.
+    // "  !ext   " = 9 chars; rest goes to description.
+    let header_desc = fit_str(
+        "open the extension browser — select, inspect, navigate sub-pages",
+        w.saturating_sub(9),
+    );
     let mut lines: Vec<Line<'_>> = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("  ", Style::default()),
+            Span::raw("  "),
             Span::styled("!ext", Style::default().fg(palette::ACCENT)),
-            Span::styled(
-                "   open the extension browser — select, inspect, navigate sub-pages",
-                Style::default().fg(palette::TEXT_DIM),
-            ),
+            Span::styled(format!("   {header_desc}"), Style::default().fg(palette::TEXT_DIM)),
         ]),
         Line::from(""),
-        Line::from(Span::styled(
-            "─".repeat(70),
-            Style::default().fg(palette::BORDER),
-        )),
+        Line::from(Span::styled("─".repeat(w), Style::default().fg(palette::BORDER))),
         Line::from(""),
     ];
 
     if entries.is_empty() {
         lines.push(Line::from(Span::styled(
-            "  no extensions available — check your connection",
+            fit_str("  no extensions available — check your connection", w),
             Style::default().fg(palette::TEXT_DIM),
         )));
         return lines;
@@ -368,35 +380,35 @@ fn card_extensions(entries: &[RegistryEntry]) -> Vec<Line<'_>> {
     )));
     lines.push(Line::from(""));
 
+    // Alias column: "  !{alias:<16}" = 18 chars; name gets the rest minus status.
+    const ALIAS_COL: usize = 18; // "  !" + 15 padded alias chars
     for entry in entries {
+        let status_str   = format!("[{}]", entry.status);
         let status_style = Style::default().fg(match entry.status.as_str() {
             "stable"  => palette::SUCCESS,
             "preview" => palette::WARNING,
             _         => palette::TEXT_DIM,
         });
 
+        // Name: w - alias_col - "  " - status_str.len()
+        let name_max = w.saturating_sub(ALIAS_COL + 2 + status_str.len());
+        let alias_str = format!("  !{:<15}", fit_str(entry.command_alias(), 15));
+
         lines.push(Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                format!("!{:<14}", entry.command_alias()),
-                Style::default().fg(palette::ACCENT),
-            ),
-            Span::styled(&entry.name, Style::default().fg(palette::TEXT)),
+            Span::styled(alias_str, Style::default().fg(palette::ACCENT)),
+            Span::styled(fit_str(&entry.name, name_max), Style::default().fg(palette::TEXT)),
             Span::raw("  "),
-            Span::styled(format!("[{}]", entry.status), status_style),
+            Span::styled(status_str, status_style),
         ]));
 
-        let desc_chars: Vec<char> = entry.description.chars().collect();
-        let max_desc = 60usize;
-        let desc: String = if desc_chars.len() <= max_desc {
-            entry.description.clone()
-        } else {
-            desc_chars[..max_desc.saturating_sub(1)].iter().collect::<String>() + "…"
-        };
+        // Description: indented by ALIAS_COL spaces, clipped to remaining width.
+        let desc_indent = ALIAS_COL;
         lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(format!("{:<16}", ""),  Style::default()),
-            Span::styled(desc, Style::default().fg(palette::TEXT_DIM)),
+            Span::raw(" ".repeat(desc_indent)),
+            Span::styled(
+                fit_str(&entry.description, w.saturating_sub(desc_indent)),
+                Style::default().fg(palette::TEXT_DIM),
+            ),
         ]));
 
         lines.push(Line::from(""));

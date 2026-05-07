@@ -2412,18 +2412,25 @@ fn show_extension_card(
                 ])
                 .split(inner);
 
-            // Row 0: name + version
+            // Row 0: name + version — clip name so version always shows.
+            let version_str = format!("v{}", entry.version);
+            let name_max    = (inner.width as usize).saturating_sub(2 + version_str.len());
+            let name_fitted = {
+                let chars: Vec<char> = entry.name.chars().collect();
+                if chars.len() <= name_max {
+                    entry.name.clone()
+                } else {
+                    chars[..name_max.saturating_sub(1)].iter().collect::<String>() + "…"
+                }
+            };
             f.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled(
-                        &entry.name,
+                        name_fitted,
                         Style::default().fg(palette::TEXT).add_modifier(Modifier::BOLD),
                     ),
                     Span::raw("  "),
-                    Span::styled(
-                        format!("v{}", entry.version),
-                        Style::default().fg(palette::TEXT_DIM),
-                    ),
+                    Span::styled(version_str, Style::default().fg(palette::TEXT_DIM)),
                 ])),
                 rows[0],
             );
