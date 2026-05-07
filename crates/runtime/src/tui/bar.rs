@@ -1940,6 +1940,14 @@ fn render_bar(
         })
         .collect();
 
+    // Always fill chunks[2] with the background first. Without this, cells
+    // above hist_area are never written to and ratatui's diff leaves stale
+    // content on screen whenever history shrinks (ghost text).
+    frame.render_widget(
+        Paragraph::new("").style(Style::default().bg(palette::BG)),
+        chunks[2],
+    );
+
     if history_height > 0 {
         if history_height <= available_height {
             // History fits — bottom-align it.
