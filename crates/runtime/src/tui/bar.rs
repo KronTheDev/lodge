@@ -103,6 +103,35 @@ impl SynonymAnim {
     }
 }
 
+/// Wipe-up animation played when `!clr` is submitted.
+///
+/// The history snapshot shrinks from the bottom each tick until empty,
+/// giving the impression of lines being swept upward off the screen.
+struct ClrAnim {
+    snapshot:  Vec<(String, String)>,
+    remaining: usize,
+}
+
+impl ClrAnim {
+    fn new(snapshot: Vec<(String, String)>) -> Self {
+        let remaining = snapshot.len();
+        Self { snapshot, remaining }
+    }
+
+    /// Advance one frame. Returns `true` when the animation is complete.
+    fn tick(&mut self) -> bool {
+        // Remove at least 1 entry per frame; larger histories sweep faster.
+        let step = (self.snapshot.len() / 10).max(1);
+        self.remaining = self.remaining.saturating_sub(step);
+        self.remaining == 0
+    }
+
+    /// Slice of history still visible this frame.
+    fn visible(&self) -> &[(String, String)] {
+        &self.snapshot[..self.remaining]
+    }
+}
+
 /// A live stat slot in the right-hand status band.
 /// One live display slot in the right-hand status band.
 struct Runspace {
@@ -526,6 +555,7 @@ pub fn run() -> anyhow::Result<()> {
     let mut history_scroll: u16 = 0;      // lines scrolled up from bottom (0 = at bottom)
     // Post-submit synonym animation — renders over last history entry's command text.
     let mut submit_anim: Option<SynonymAnim> = None;
+    let mut clr_anim:    Option<ClrAnim>     = None;
     // Split mode — active only for `!command` structural commands.
     let mut split_mode  = false;
     let mut split_cmd   = String::new();  // canonical command (e.g. "verify")
@@ -556,6 +586,11 @@ pub fn run() -> anyhow::Result<()> {
         // Advance post-submit synonym animation.
         if let Some(ref mut a) = submit_anim {
             if a.tick() { submit_anim = None; }
+        }
+
+        // Advance clear animation.
+        if let Some(ref mut a) = clr_anim {
+            if a.tick() { clr_anim = None; }
         }
 
         // Tick runspace animations and refresh live probes.
@@ -601,15 +636,23 @@ pub fn run() -> anyhow::Result<()> {
 
         // Pre-compute hover suggestion before draw (decouples geometry from render).
         let term_size = terminal.size().unwrap_or_default();
+        let hist_for_hover: &[(String, String)] = clr_anim
+            .as_ref()
+            .map(|a| a.visible())
+            .unwrap_or(&history);
         let hover_suggestion = compute_hover_suggestion(
-            hover_row, &history, history_scroll, split_mode, term_size.height,
+            hover_row, hist_for_hover, history_scroll, split_mode, term_size.height,
         );
 
         // Draw first — guarantees at least one "thinking..." frame is visible
         // before the result can replace it.
+        let hist_display: &[(String, String)] = clr_anim
+            .as_ref()
+            .map(|a| a.visible())
+            .unwrap_or(&history);
         terminal.draw(|f| {
             render_bar(
-                &input, cursor, &history, history_scroll,
+                &input, cursor, hist_display, history_scroll,
                 thinking, submit_anim.as_ref(),
                 split_mode, &split_cmd, &split_args, split_cursor,
                 hover_suggestion.as_deref(),
@@ -650,7 +693,7 @@ pub fn run() -> anyhow::Result<()> {
         }
 
         // Poll — 16 ms when typewriter/bar-fill is running, 50 ms otherwise (spinner is fine at 50ms).
-        let poll_ms = if submit_anim.is_some() || needs_fast { 16 } else { 50 };
+        let poll_ms = if submit_anim.is_some() || needs_fast || clr_anim.is_some() { 16 } else { 50 };
         if !event::poll(std::time::Duration::from_millis(poll_ms))? {
             continue;
         }
@@ -927,9 +970,9 @@ pub fn run() -> anyhow::Result<()> {
                                 register_active = false;
                             }
 
-                            // ── Clr: clear chat history ──────────────────────────────────
+                            // ── Clr: clear chat history (wipe-up animation) ──────────────
                             if trimmed == "clr" {
-                                history.clear();
+                                clr_anim = Some(ClrAnim::new(std::mem::take(&mut history)));
                                 history_scroll = 0;
                                 continue;
                             }
