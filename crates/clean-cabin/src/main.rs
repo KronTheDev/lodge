@@ -126,76 +126,100 @@ fn cmd_scan(scan_path: Option<PathBuf>) -> Result<()> {
     combined_exclude.extend(exclusions);
 
     let entries = run_scan_progress(&mut terminal, &dirs, &combined_exclude)?;
-    let total = entries.len();
-    let _ = total;
+    let entry_count = entries.len();
 
-    // ── Step 4: Score + AI ────────────────────────────────────────────────────
-    {
-        // Show "thinking..." while scoring.
-        let dirs_clone = dirs.clone();
-        terminal.draw(|f| {
-            report::renderer::render_scan_progress(
-                &dirs_label(&dirs_clone),
-                entries.len(),
-                0,
-                0,
-                f,
-            );
-        })?;
-    }
-
-    let guarded = scanner::receipt_guard::load_receipt_paths();
-    let mut hashes = std::collections::HashMap::new();
-
-    let mut scored: Vec<(scanner::walker::FileEntry, scanner::heuristics::HeuristicScore)> =
-        entries
-            .into_iter()
-            .map(|entry| {
-                let mut score = scanner::heuristics::score(&entry, &config, &mut hashes);
-                score.is_receipt_guarded =
-                    scanner::receipt_guard::is_guarded(&entry.path, &guarded);
-                (entry, score)
-            })
-            .filter(|(_, s)| s.tier_hint != TierHint::Keep)
-            .collect();
-
+    // ── Step 4: Score (background thread, TUI stays live) ────────────────────
     let no_ai = config.ai_mode == config::AiMode::None;
-    let ai_scores: Vec<scanner::ai_scorer::AiScore> = if !no_ai {
-        let entries_ref: Vec<&scanner::walker::FileEntry> =
-            scored.iter().map(|(e, _)| e).collect();
-        scanner::ai_scorer::score_batch(&entries_ref, &config)
-    } else {
-        Vec::new()
-    };
+    let config_clone = config.clone();
+    let dirs_label_str = dirs_label(&dirs);
+    let score_handle = std::thread::spawn(move || {
+        let guarded = scanner::receipt_guard::load_receipt_paths();
 
-    let flagged: Vec<FlaggedFile> = scored
-        .drain(..)
-        .enumerate()
-        .map(|(i, (entry, h))| {
-            let ai = ai_scores.get(i);
-            let tier = report::tiers::classify(&h, ai);
-            let reason = if let Some(a) = ai {
-                if !a.reason.is_empty() && !h.reason.is_empty() {
-                    format!("{} — {}", h.reason, a.reason)
-                } else if !a.reason.is_empty() {
-                    a.reason.clone()
+        let mut scored: Vec<(scanner::walker::FileEntry, scanner::heuristics::HeuristicScore)> =
+            entries
+                .into_iter()
+                .map(|entry| {
+                    let mut score = scanner::heuristics::score(&entry, &config_clone);
+                    score.is_receipt_guarded =
+                        scanner::receipt_guard::is_guarded(&entry.path, &guarded);
+                    (entry, score)
+                })
+                .filter(|(_, s)| s.tier_hint != TierHint::Keep)
+                .collect();
+
+        let ai_scores: Vec<scanner::ai_scorer::AiScore> = if !no_ai {
+            let entries_ref: Vec<&scanner::walker::FileEntry> =
+                scored.iter().map(|(e, _)| e).collect();
+            scanner::ai_scorer::score_batch(&entries_ref, &config_clone)
+        } else {
+            Vec::new()
+        };
+
+        let flagged: Vec<FlaggedFile> = scored
+            .drain(..)
+            .enumerate()
+            .map(|(i, (entry, h))| {
+                let ai = ai_scores.get(i);
+                let tier = report::tiers::classify(&h, ai);
+                let reason = if let Some(a) = ai {
+                    if !a.reason.is_empty() && !h.reason.is_empty() {
+                        format!("{} — {}", h.reason, a.reason)
+                    } else if !a.reason.is_empty() {
+                        a.reason.clone()
+                    } else {
+                        h.reason.clone()
+                    }
                 } else {
                     h.reason.clone()
-                }
-            } else {
-                h.reason.clone()
-            };
+                };
 
-            FlaggedFile {
-                entry,
-                tier,
-                reason,
-                guarded: h.is_receipt_guarded,
-                selected: false,
+                FlaggedFile {
+                    entry,
+                    tier,
+                    reason,
+                    guarded: h.is_receipt_guarded,
+                    selected: false,
+                }
+            })
+            .filter(|f| f.tier != Tier::YouDecide || !no_ai)
+            .collect();
+
+        flagged
+    });
+
+    // Poll while scoring runs — show the scan screen with a spinner.
+    let mut spinner_frame: u8 = 0;
+    let mut frame_tick: u32 = 0;
+    loop {
+        terminal.draw(|f| {
+            report::renderer::render_scan_progress(&dirs_label_str, entry_count, true, spinner_frame, f);
+        })?;
+
+        if score_handle.is_finished() {
+            break;
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+        frame_tick += 1;
+        if frame_tick.is_multiple_of(4) {
+            spinner_frame = spinner_frame.wrapping_add(1);
+        }
+
+        if event::poll(Duration::from_millis(0))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press
+                    && (matches!(key.code, KeyCode::Esc)
+                        || (key.code == KeyCode::Char('c')
+                            && key.modifiers == KeyModifiers::CONTROL))
+                {
+                    leave_tui(&mut terminal)?;
+                    return Ok(());
+                }
             }
-        })
-        .filter(|f| f.tier != Tier::YouDecide || !no_ai)
-        .collect();
+        }
+    }
+
+    let flagged = score_handle.join().unwrap_or_default();
 
     // ── Step 5 / 6: Empty result ──────────────────────────────────────────────
     if flagged.is_empty() {
@@ -394,7 +418,7 @@ fn run_scan_progress(
         let count = counter.load(Ordering::Relaxed);
 
         terminal.draw(|f| {
-            report::renderer::render_scan_progress(&label, count, 0, spinner_frame, f);
+            report::renderer::render_scan_progress(&label, count, false, spinner_frame, f);
         })?;
 
         if handle.is_finished() {

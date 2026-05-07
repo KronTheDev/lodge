@@ -1,11 +1,6 @@
 //! Rule-based heuristic scoring of file entries.
 
-use std::collections::HashMap;
-use std::io::Read;
-use std::path::PathBuf;
 use std::time::SystemTime;
-
-use sha2::{Digest, Sha256};
 
 use crate::config::Config;
 use crate::scanner::walker::FileEntry;
@@ -42,21 +37,6 @@ fn age_days(time: Option<SystemTime>) -> Option<u64> {
     Some(duration.as_secs() / 86_400)
 }
 
-/// Compute the SHA-256 hex digest of a file.
-fn sha256_file(path: &std::path::Path) -> Option<String> {
-    let mut file = std::fs::File::open(path).ok()?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = file.read(&mut buf).ok()?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Some(format!("{:x}", hasher.finalize()))
-}
-
 /// Known junk file names (exact, case-insensitive).
 const JUNK_NAMES: &[&str] = &[
     "thumbs.db",
@@ -87,14 +67,7 @@ const INSTALLER_PATTERNS: &[&str] = &[
 const INSTALLER_EXTENSIONS: &[&str] = &["exe", "msi"];
 
 /// Score a single `FileEntry` using rule-based heuristics.
-///
-/// `hashes` tracks SHA-256 → path for duplicate detection; entries are
-/// inserted as files are scored so calling order matters.
-pub fn score(
-    entry: &FileEntry,
-    config: &Config,
-    hashes: &mut HashMap<String, PathBuf>,
-) -> HeuristicScore {
+pub fn score(entry: &FileEntry, config: &Config) -> HeuristicScore {
     let name_lower = entry
         .path
         .file_name()
@@ -159,27 +132,6 @@ pub fn score(
                 reason: format!("log file not updated in {age} days"),
                 is_receipt_guarded: false,
             };
-        }
-    }
-
-    // ── Duplicate detection ───────────────────────────────────────────────────
-    // Only hash files below a reasonable ceiling to avoid stalling on huge
-    // binaries. Files ≥ 500 MB are skipped for duplicates.
-    const HASH_SIZE_LIMIT: u64 = 500 * 1024 * 1024;
-    if !entry.is_dir && entry.size > 0 && entry.size < HASH_SIZE_LIMIT {
-        if let Some(digest) = sha256_file(&entry.path) {
-            if let Some(original) = hashes.get(&digest) {
-                let orig_name = original
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| original.display().to_string());
-                return HeuristicScore {
-                    tier_hint: TierHint::ClearOut,
-                    reason: format!("duplicate of {orig_name}"),
-                    is_receipt_guarded: false,
-                };
-            }
-            hashes.insert(digest, entry.path.clone());
         }
     }
 

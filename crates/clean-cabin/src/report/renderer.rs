@@ -591,10 +591,11 @@ pub fn render_confirmation(
 /// `dirs_label` is a short string describing what is being scanned.
 /// `file_count` is the current live count. `flagged` is how many were flagged
 /// so far. `spinner_frame` cycles 0..3 to animate `◐◑◒◓`.
+/// `scoring` is `true` during the post-walk scoring phase (shows different label).
 pub fn render_scan_progress(
     dirs_label: &str,
     file_count: usize,
-    flagged: usize,
+    scoring: bool,
     spinner_frame: u8,
     frame: &mut Frame,
 ) {
@@ -609,16 +610,19 @@ pub fn render_scan_progress(
         _ => "◓",
     };
 
-    // Gauge: use file_count / 10000 as proxy for progress (unknown total).
-    let ratio = (file_count as f64 / 10000.0_f64).min(1.0);
+    // Gauge: use file_count / 10000 as proxy for scan progress (unknown total).
+    // Stays full and pulses while scoring.
+    let ratio = if scoring { 1.0 } else { (file_count as f64 / 10000.0_f64).min(1.0) };
     let gauge_width = (area.width.saturating_sub(4)) as usize;
     let filled = (ratio * gauge_width as f64) as usize;
     let empty = gauge_width.saturating_sub(filled);
     let gauge_str = format!("  {}{}", "▓".repeat(filled), "░".repeat(empty));
 
-    let label = format!(
-        "  {spinner}  {file_count} files examined · {flagged} flagged so far..."
-    );
+    let label = if scoring {
+        format!("  {spinner}  {file_count} files found · scoring...")
+    } else {
+        format!("  {spinner}  {file_count} files examined...")
+    };
 
     let lines = vec![
         Line::from(""),
