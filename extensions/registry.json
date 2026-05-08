@@ -21,7 +21,7 @@
       "alias": "clean",
       "payload": null,
       "payload_url": "https://github.com/KronTheDev/lodge/releases/download/extensions-v0.1.0/clean-cabin-0.1.0.zip",
-      "sha256": "5df180e6e1016fc16b87880f37150904e7e8aedb2dfe65d1831b3fa515fa8838",
+      "sha256": "89276dc901898e92ac3b4ba094d35f365aec66e2812ab9406ad86ff540515abe",
       "commands": [
         { "usage": "!clean",          "description": "scan home directory and stage flagged files" },
         { "usage": "!clean <path>",   "description": "scan a specific directory instead of home" },
