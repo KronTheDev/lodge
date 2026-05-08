@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Validate extensions/registry.json for Lodge.
+Validate extensions/registry.json and extensions/official.json for Lodge.
 
 Checks:
-  - JSON is well-formed
+  - JSON is well-formed (both files)
   - schema field is present and is an integer
   - No duplicate extension IDs
   - No duplicate resolved aliases (alias field, falling back to id — mirrors command_alias())
   - status is one of: stable | preview | coming-soon
   - sha256 is present whenever payload_url is set (no unverified remote downloads)
   - sha256, when present, is a 64-character lowercase hex string
+  - Every ID in official.json exists in registry.json
 
 Exit codes:
   0 — valid
@@ -120,6 +121,38 @@ for i, entry in enumerate(extensions):
             f"{label}: 'sha256' must be a 64-character lowercase hex string, "
             f"got '{sha256[:20]}...'"
         )
+
+# ── official.json cross-check ─────────────────────────────────────────────────
+
+OFFICIAL_PATH = Path(__file__).parent.parent / "extensions" / "official.json"
+
+try:
+    official_raw = OFFICIAL_PATH.read_text(encoding="utf-8")
+except FileNotFoundError:
+    err(f"extensions/official.json not found — it must exist even if empty")
+    official_raw = None
+
+if official_raw is not None:
+    try:
+        official_data = json.loads(official_raw)
+    except json.JSONDecodeError as e:
+        err(f"official.json is not valid JSON — {e}")
+        official_data = None
+
+    if official_data is not None:
+        official_ids = official_data.get("official", [])
+        if not isinstance(official_ids, list):
+            err("official.json: 'official' must be an array")
+        else:
+            known_ids = {e.get("id") for e in extensions if isinstance(e, dict)}
+            for oid in official_ids:
+                if not isinstance(oid, str):
+                    err(f"official.json: entry {oid!r} is not a string")
+                elif oid not in known_ids:
+                    err(
+                        f"official.json: '{oid}' is not in registry.json — "
+                        "remove it or add the extension to the registry first"
+                    )
 
 # ── Report ────────────────────────────────────────────────────────────────────
 

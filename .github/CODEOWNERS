@@ -1,0 +1,4 @@
+# Official extension designation is admin-only.
+# Any PR touching official.json requires explicit approval from @KronTheDev.
+# This prevents anyone from self-designating their extension as official.
+extensions/official.json @KronTheDev

@@ -4,9 +4,11 @@ on:
   pull_request:
     paths:
       - extensions/registry.json
+      - extensions/official.json
   push:
     paths:
       - extensions/registry.json
+      - extensions/official.json
       - scripts/validate_registry.py
 
 jobs:

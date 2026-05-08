@@ -8,6 +8,8 @@
 //   0  overview  — name, version, description, status, command
 //   1  commands  — list of sub-commands (from RegistryEntry.commands)
 //
+// `selected` is an index into the *visible* (filtered) list, not into `entries`.
+// Use `selected_real_idx()` to get the corresponding `entries` position.
 // All dynamic text is clipped to the enclosing Rect width before rendering.
 
 use ratatui::{
@@ -18,38 +20,117 @@ use ratatui::{
     Frame,
 };
 
-use crate::engine::extensions::RegistryEntry;
+use crate::engine::extensions::{is_installed, RegistryEntry};
 use super::palette;
+
+// ── Action ────────────────────────────────────────────────────────────────────
+
+/// An action the user triggered inside the browser that bar.rs must execute.
+pub enum ExtAction {
+    /// Toggle the extension on/off.  `bar.rs` persists the new state and
+    /// auto-installs if the extension was just enabled but is not present.
+    Toggle(String),
+    /// Explicitly download and install the extension binary.
+    Install(String),
+    /// Remove the extension binary (and disable it if enabled).
+    Uninstall(String),
+}
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
 /// Mutable state for the extension browser overlay.
 pub struct ExtBrowserState {
     pub entries: Vec<RegistryEntry>,
-    /// Currently highlighted extension index in the list.
+    /// Index into the *visible* (search-filtered) list.
     pub selected: usize,
     /// `true` = detail view is open; `false` = list view.
     pub in_detail: bool,
     /// Current sub-page index in detail view.
     pub sub_page: usize,
+    /// IDs of extensions the user has explicitly enabled.
+    pub enabled: std::collections::HashSet<String>,
+    /// Precomputed installation status, indexed by `entries` position.
+    pub installed: Vec<bool>,
+    /// Whether the registry was fetched fresh from GitHub this session.
+    pub online: bool,
+    /// Current search / filter text.
+    pub search: String,
+    /// `true` while the search input is focused (typing goes to filter).
+    pub search_active: bool,
+    /// IDs designated official by the Lodge maintainers (from `official.json`).
+    pub official_ids: std::collections::HashSet<String>,
 }
 
 impl ExtBrowserState {
-    pub fn new(entries: Vec<RegistryEntry>) -> Self {
-        Self { entries, selected: 0, in_detail: false, sub_page: 0 }
+    /// Create a new browser state.
+    /// `enabled`      — persisted `ExtState.enabled`;
+    /// `online`       — whether `fetch_registry` reached GitHub;
+    /// `official_ids` — set fetched from `extensions/official.json`.
+    pub fn new(
+        entries: Vec<RegistryEntry>,
+        enabled: std::collections::HashSet<String>,
+        online: bool,
+        official_ids: std::collections::HashSet<String>,
+    ) -> Self {
+        let installed = entries.iter().map(|e| is_installed(&e.id)).collect();
+        Self {
+            entries,
+            selected: 0,
+            in_detail: false,
+            sub_page: 0,
+            enabled,
+            installed,
+            online,
+            search: String::new(),
+            search_active: false,
+            official_ids,
+        }
+    }
+
+    /// Recompute `installed` from the filesystem.  Call after install/uninstall.
+    pub fn refresh_installed(&mut self) {
+        self.installed = self.entries.iter().map(|e| is_installed(&e.id)).collect();
+    }
+
+    /// Indices into `entries` that match the current search filter.
+    pub fn visible_indices(&self) -> Vec<usize> {
+        if self.search.is_empty() {
+            return (0..self.entries.len()).collect();
+        }
+        let q = self.search.to_lowercase();
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                e.name.to_lowercase().contains(&q)
+                    || e.description.to_lowercase().contains(&q)
+                    || e.command_alias().to_lowercase().contains(&q)
+                    || e.id.to_lowercase().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Number of currently visible entries.
+    pub fn visible_count(&self) -> usize {
+        self.visible_indices().len()
+    }
+
+    /// The `entries` index of the currently selected visible item.
+    pub fn selected_real_idx(&self) -> Option<usize> {
+        self.visible_indices().get(self.selected).copied()
     }
 
     /// Number of sub-pages for the currently selected entry.
     pub fn sub_page_count(&self) -> usize {
-        let e = &self.entries[self.selected];
-        if e.commands.is_empty() { 1 } else { 2 }
+        let Some(real) = self.selected_real_idx() else { return 1 };
+        if self.entries[real].commands.is_empty() { 1 } else { 2 }
     }
 }
 
 // ── Fit helper ────────────────────────────────────────────────────────────────
 
 /// Truncate `s` to `max` visible characters, appending `…` if clipped.
-/// `max = 0` returns an empty string.
 fn fit(s: &str, max: usize) -> String {
     if max == 0 { return String::new(); }
     let chars: Vec<char> = s.chars().collect();
@@ -75,9 +156,12 @@ pub fn render(state: &ExtBrowserState, frame: &mut Frame) {
     frame.render_widget(Clear, card);
 
     let title_text = if state.in_detail {
-        // Fit title to card width minus borders and padding.
         let max_title = card_w.saturating_sub(6) as usize;
-        format!(" {} ", fit(&state.entries[state.selected].name, max_title))
+        if let Some(real) = state.selected_real_idx() {
+            format!(" {} ", fit(&state.entries[real].name, max_title))
+        } else {
+            " extensions ".to_string()
+        }
     } else {
         " extensions ".to_string()
     };
@@ -96,16 +180,14 @@ pub fn render(state: &ExtBrowserState, frame: &mut Frame) {
     // Bottom 2 rows: separator + nav bar.
     let content_h = inner.height.saturating_sub(2);
     let content_area = Rect { height: content_h, ..inner };
-    let sep_area = Rect { x: inner.x, y: inner.y + content_h,     width: inner.width, height: 1 };
-    let nav_area = Rect { x: inner.x, y: inner.y + content_h + 1, width: inner.width, height: 1 };
+    let sep_area    = Rect { x: inner.x, y: inner.y + content_h,     width: inner.width, height: 1 };
+    let nav_area    = Rect { x: inner.x, y: inner.y + content_h + 1, width: inner.width, height: 1 };
 
-    // Separator — always fills exactly the inner width.
     let sep = "─".repeat(inner.width as usize);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(sep, Style::default().fg(palette::BORDER)))),
         sep_area,
     );
-
     frame.render_widget(
         Paragraph::new(nav_line(state)).alignment(Alignment::Center),
         nav_area,
@@ -120,76 +202,195 @@ pub fn render(state: &ExtBrowserState, frame: &mut Frame) {
 
 // ── List view ─────────────────────────────────────────────────────────────────
 
+/// Append one entry row (name line + description line + blank) to `lines`.
+fn emit_entry<'a>(
+    state: &'a ExtBrowserState,
+    real_idx: usize,
+    vis_pos: usize,
+    w: usize,
+    lines: &mut Vec<Line<'a>>,
+) {
+    let entry     = &state.entries[real_idx];
+    let selected  = vis_pos == state.selected;
+    let on        = state.enabled.contains(&entry.id);
+    let installed = state.installed.get(real_idx).copied().unwrap_or(false);
+    let official  = state.official_ids.contains(&entry.id);
+
+    let indicator = if selected {
+        Span::styled("▶ ", Style::default().fg(palette::ACCENT))
+    } else {
+        Span::raw("  ")
+    };
+
+    let name_style = if selected {
+        Style::default().fg(palette::TEXT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(palette::TEXT)
+    };
+    let alias_style = if selected {
+        Style::default().fg(palette::ACCENT)
+    } else {
+        Style::default().fg(palette::TEXT_DIM)
+    };
+    let status_style = Style::default().fg(match entry.status.as_str() {
+        "stable"  => palette::SUCCESS,
+        "preview" => palette::WARNING,
+        _         => palette::TEXT_DIM,
+    });
+    let (toggle_text, toggle_style) = if on {
+        let colour = if installed { palette::SUCCESS } else { palette::WARNING };
+        ("[on]", Style::default().fg(colour))
+    } else {
+        ("[off]", Style::default().fg(palette::TEXT_DIM))
+    };
+
+    let alias        = format!("!{}", entry.command_alias());
+    let version      = format!("v{}", entry.version);
+    let status       = format!("[{}]", entry.status);
+    let official_tag = if official { "  ✦" } else { "" };
+    let right_w = 2 + version.len() + 2 + alias.len() + 2 + status.len()
+                  + 2 + toggle_text.len() + official_tag.len();
+    let name_max = w.saturating_sub(2 + right_w);
+    let name     = fit(&entry.name, name_max);
+
+    let mut spans: Vec<Span<'_>> = vec![
+        indicator,
+        Span::styled(name, name_style),
+        Span::raw("  "),
+        Span::styled(version, Style::default().fg(palette::TEXT_DIM)),
+        Span::raw("  "),
+        Span::styled(alias, alias_style),
+        Span::raw("  "),
+        Span::styled(status, status_style),
+        Span::raw("  "),
+        Span::styled(toggle_text, toggle_style),
+    ];
+    if official {
+        spans.push(Span::styled(
+            official_tag,
+            Style::default().fg(palette::HIGHLIGHT),
+        ));
+    }
+    lines.push(Line::from(spans));
+
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            fit(&entry.description, w.saturating_sub(2)),
+            Style::default().fg(palette::TEXT_DIM),
+        ),
+    ]));
+
+    lines.push(Line::from(""));
+}
+
 fn render_list(state: &ExtBrowserState, frame: &mut Frame, area: Rect) {
     let padded = area.inner(Margin { horizontal: 2, vertical: 1 });
-    let w = padded.width as usize;
+    let w      = padded.width as usize;
+    let vis    = state.visible_indices();
 
-    let mut lines: Vec<Line<'_>> = vec![
-        Line::from(Span::styled(
-            format!("  {} extension{} available", state.entries.len(),
-                if state.entries.len() == 1 { "" } else { "s" }),
-            Style::default().fg(palette::TEXT_DIM),
-        )),
-        Line::from(""),
-    ];
+    let mut lines: Vec<Line<'_>> = Vec::new();
 
-    for (i, entry) in state.entries.iter().enumerate() {
-        let selected = i == state.selected;
-
-        let indicator = if selected {
-            Span::styled("▶ ", Style::default().fg(palette::ACCENT))
-        } else {
-            Span::raw("  ")
-        };
-
-        let name_style = if selected {
-            Style::default().fg(palette::TEXT).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(palette::TEXT)
-        };
-        let alias_style = if selected {
-            Style::default().fg(palette::ACCENT)
-        } else {
-            Style::default().fg(palette::TEXT_DIM)
-        };
-        let status_style = Style::default().fg(match entry.status.as_str() {
-            "stable"  => palette::SUCCESS,
-            "preview" => palette::WARNING,
-            _         => palette::TEXT_DIM,
-        });
-
-        // Right side of name row: "  v{version}  !{alias}  [{status}]"
-        // Reserve space for these fields so name doesn't collide.
-        let alias    = format!("!{}", entry.command_alias());
-        let version  = format!("v{}", entry.version);
-        let status   = format!("[{}]", entry.status);
-        // fixed overhead: indicator(2) + "  "(2) + "  "(2) + "  "(2) = 8
-        // plus the version, alias, status widths
-        let right_w  = 2 + version.len() + 2 + alias.len() + 2 + status.len();
-        let name_max = w.saturating_sub(2 + right_w); // 2 = indicator width
-        let name     = fit(&entry.name, name_max);
-
-        // Name row — all pieces on one line.
-        lines.push(Line::from(vec![
-            indicator.clone(),
-            Span::styled(name, name_style),
-            Span::raw("  "),
-            Span::styled(version, Style::default().fg(palette::TEXT_DIM)),
-            Span::raw("  "),
-            Span::styled(alias, alias_style),
-            Span::raw("  "),
-            Span::styled(status, status_style),
-        ]));
-
-        // Description row — indented, clipped to panel width.
-        let indent = 2usize; // "  "
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(fit(&entry.description, w.saturating_sub(indent)),
-                Style::default().fg(palette::TEXT_DIM)),
-        ]));
-
+    // Offline disclaimer
+    if !state.online {
+        lines.push(Line::from(Span::styled(
+            fit("  ! offline — showing cached registry", w),
+            Style::default().fg(palette::WARNING),
+        )));
         lines.push(Line::from(""));
+    }
+
+    // Search bar / count header
+    if state.search_active || !state.search.is_empty() {
+        let cursor = if state.search_active { "▌" } else { "" };
+        lines.push(Line::from(Span::styled(
+            fit(&format!("  / {}{}", state.search, cursor), w),
+            Style::default().fg(palette::ACCENT),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  {} of {} match{}",
+                vis.len(),
+                state.entries.len(),
+                if vis.len() == 1 { "" } else { "es" }
+            ),
+            Style::default().fg(palette::TEXT_DIM),
+        )));
+        lines.push(Line::from(""));
+    } else {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  {} extension{} available",
+                state.entries.len(),
+                if state.entries.len() == 1 { "" } else { "s" }
+            ),
+            Style::default().fg(palette::TEXT_DIM),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    if vis.is_empty() {
+        lines.push(Line::from(Span::styled(
+            fit("  nothing matches — try a different search", w),
+            Style::default().fg(palette::TEXT_DIM),
+        )));
+        frame.render_widget(Paragraph::new(lines), padded);
+        return;
+    }
+
+    // Split visible indices into official and community buckets, preserving order.
+    let official_vis: Vec<usize> = vis.iter().copied()
+        .filter(|&i| state.official_ids.contains(&state.entries[i].id))
+        .collect();
+    let community_vis: Vec<usize> = vis.iter().copied()
+        .filter(|&i| !state.official_ids.contains(&state.entries[i].id))
+        .collect();
+
+    // Build a flat render order with section headers injected.
+    // Each item is (entries_real_idx, vis_pos_in_original_vis).
+    let mut render_order: Vec<(usize, usize)> = Vec::new();
+    let has_both = !official_vis.is_empty() && !community_vis.is_empty();
+
+    if !official_vis.is_empty() {
+        if has_both {
+            lines.push(Line::from(Span::styled(
+                fit("  official", w),
+                Style::default().fg(palette::HIGHLIGHT).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(""));
+        }
+        for real_idx in &official_vis {
+            let vis_pos = vis.iter().position(|&i| i == *real_idx).unwrap_or(0);
+            render_order.push((*real_idx, vis_pos));
+        }
+    }
+
+    if has_both {
+        // Emit official entries first, then separator before community.
+        for (real_idx, vis_pos) in &render_order {
+            emit_entry(state, *real_idx, *vis_pos, w, &mut lines);
+        }
+        render_order.clear();
+        lines.push(Line::from(Span::styled(
+            "  ".to_string() + &"─".repeat(w.saturating_sub(2)),
+            Style::default().fg(palette::BORDER),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            fit("  community", w),
+            Style::default().fg(palette::TEXT_DIM).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        for real_idx in &community_vis {
+            let vis_pos = vis.iter().position(|&i| i == *real_idx).unwrap_or(0);
+            emit_entry(state, *real_idx, vis_pos, w, &mut lines);
+        }
+    } else {
+        // Only one section — no headers needed.
+        for real_idx in official_vis.iter().chain(community_vis.iter()) {
+            let vis_pos = vis.iter().position(|&i| i == *real_idx).unwrap_or(0);
+            emit_entry(state, *real_idx, vis_pos, w, &mut lines);
+        }
     }
 
     frame.render_widget(Paragraph::new(lines), padded);
@@ -198,13 +399,14 @@ fn render_list(state: &ExtBrowserState, frame: &mut Frame, area: Rect) {
 // ── Detail view ───────────────────────────────────────────────────────────────
 
 fn render_detail(state: &ExtBrowserState, frame: &mut Frame, area: Rect) {
-    let entry = &state.entries[state.selected];
+    let Some(real_idx) = state.selected_real_idx() else { return };
+    let entry  = &state.entries[real_idx];
     let padded = area.inner(Margin { horizontal: 2, vertical: 1 });
 
-    let total = state.sub_page_count();
-    let dots_area = Rect { height: 1, ..padded };
+    let total      = state.sub_page_count();
+    let dots_area  = Rect { height: 1, ..padded };
     let content_area = Rect {
-        y: padded.y + 2,
+        y:      padded.y + 2,
         height: padded.height.saturating_sub(2),
         ..padded
     };
@@ -225,27 +427,24 @@ fn render_detail(state: &ExtBrowserState, frame: &mut Frame, area: Rect) {
         );
     }
 
+    let official = state.official_ids.contains(&entry.id);
     let w = padded.width as usize;
     let lines: Vec<Line<'_>> = match state.sub_page {
-        0 => detail_overview(entry, w),
+        0 => detail_overview_inner(entry, w, official),
         1 => detail_commands(entry, w),
         _ => vec![],
     };
-
     frame.render_widget(Paragraph::new(lines), content_area);
 }
 
-fn detail_overview(entry: &RegistryEntry, w: usize) -> Vec<Line<'_>> {
-    // Label column is 14 chars; value gets the rest.
+fn detail_overview_inner(entry: &RegistryEntry, w: usize, official: bool) -> Vec<Line<'_>> {
     const LABEL_W: usize = 14;
     let val_w = w.saturating_sub(LABEL_W);
-
     let lbl = |k: &'static str| Span::styled(format!("{k:<LABEL_W$}"), Style::default().fg(palette::TEXT_DIM));
     let val = |v: String| Span::styled(v, Style::default().fg(palette::TEXT));
 
-    // Name + version on one line; name gets available width after version.
     let version  = format!("v{}", entry.version);
-    let name_max = w.saturating_sub(2 + version.len()); // 2 = "  " separator
+    let name_max = w.saturating_sub(2 + version.len());
     let name     = fit(&entry.name, name_max);
 
     let mut lines = vec![
@@ -256,27 +455,24 @@ fn detail_overview(entry: &RegistryEntry, w: usize) -> Vec<Line<'_>> {
             Span::styled(version, Style::default().fg(palette::TEXT_DIM)),
         ]),
         Line::from(""),
-        // Description — full panel width.
         Line::from(Span::styled(fit(&entry.description, w), Style::default().fg(palette::TEXT_DIM))),
         Line::from(""),
         Line::from(Span::styled("─".repeat(w), Style::default().fg(palette::BORDER))),
         Line::from(""),
-        Line::from(vec![
-            lbl("command"),
-            val(fit(&format!("!{}", entry.command_alias()), val_w)),
-        ]),
-        Line::from(vec![
-            lbl("status"),
-            val(fit(&entry.status, val_w)),
-        ]),
+        Line::from(vec![lbl("command"), val(fit(&format!("!{}", entry.command_alias()), val_w))]),
+        Line::from(vec![lbl("status"),  val(fit(&entry.status, val_w))]),
     ];
+
+    if official {
+        lines.push(Line::from(vec![
+            lbl("origin"),
+            Span::styled("✦ official", Style::default().fg(palette::HIGHLIGHT)),
+        ]));
+    }
 
     if let Some(url) = &entry.payload_url {
         if !url.is_empty() {
-            lines.push(Line::from(vec![
-                lbl("source"),
-                val(fit(url, val_w)),
-            ]));
+            lines.push(Line::from(vec![lbl("source"), val(fit(url, val_w))]));
         }
     }
 
@@ -303,9 +499,8 @@ fn detail_commands(entry: &RegistryEntry, w: usize) -> Vec<Line<'_>> {
         ];
     }
 
-    // Usage column: 22 chars + 2 indent = 24 reserved; description gets rest.
-    const USAGE_W: usize  = 22;
-    const INDENT: usize   = 2;
+    const USAGE_W: usize = 22;
+    const INDENT: usize  = 2;
     let desc_w = w.saturating_sub(INDENT + USAGE_W);
 
     let mut lines = vec![
@@ -321,10 +516,7 @@ fn detail_commands(entry: &RegistryEntry, w: usize) -> Vec<Line<'_>> {
                 format!("{:<USAGE_W$}", fit(&cmd.usage, USAGE_W)),
                 Style::default().fg(palette::ACCENT),
             ),
-            Span::styled(
-                fit(&cmd.description, desc_w),
-                Style::default().fg(palette::TEXT_DIM),
-            ),
+            Span::styled(fit(&cmd.description, desc_w), Style::default().fg(palette::TEXT_DIM)),
         ]));
     }
 
@@ -334,7 +526,8 @@ fn detail_commands(entry: &RegistryEntry, w: usize) -> Vec<Line<'_>> {
 // ── Nav bar ───────────────────────────────────────────────────────────────────
 
 fn nav_line(state: &ExtBrowserState) -> Line<'_> {
-    let dim = Style::default().fg(palette::TEXT_DIM);
+    let dim    = Style::default().fg(palette::TEXT_DIM);
+    let on_clr = Style::default().fg(palette::ACCENT);
 
     if state.in_detail {
         let total = state.sub_page_count();
@@ -343,7 +536,7 @@ fn nav_line(state: &ExtBrowserState) -> Line<'_> {
             for i in 0..total {
                 if i > 0 { spans.push(Span::raw("  ")); }
                 if i == state.sub_page {
-                    spans.push(Span::styled("●", Style::default().fg(palette::ACCENT)));
+                    spans.push(Span::styled("●", on_clr));
                 } else {
                     spans.push(Span::styled("○", dim));
                 }
@@ -352,7 +545,26 @@ fn nav_line(state: &ExtBrowserState) -> Line<'_> {
         }
         spans.push(Span::styled("[B] back  [Q] close", dim));
         Line::from(spans)
+    } else if state.search_active {
+        Line::from(vec![
+            Span::styled("[↑][↓] nav  ", dim),
+            Span::styled("type to filter", on_clr),
+            Span::styled("  [Esc] clear  [Q] close", dim),
+        ])
     } else {
-        Line::from(Span::styled("[↑][↓] select  [Enter] open  [Q] close", dim))
+        let real = state.selected_real_idx();
+        let on        = real.map(|i| state.enabled.contains(&state.entries[i].id)).unwrap_or(false);
+        let installed = real.and_then(|i| state.installed.get(i).copied()).unwrap_or(false);
+
+        let toggle_label = if on { "[Spc] disable" } else { "[Spc] enable" };
+
+        let mut spans: Vec<Span<'_>> = vec![
+            Span::styled("[↑][↓]  [↵] detail  ", dim),
+            Span::styled(toggle_label, on_clr),
+        ];
+        if !installed { spans.push(Span::styled("  [I] install", dim)); }
+        if  installed { spans.push(Span::styled("  [U] remove",  dim)); }
+        spans.push(Span::styled("  [/] search  [Q] close", dim));
+        Line::from(spans)
     }
 }

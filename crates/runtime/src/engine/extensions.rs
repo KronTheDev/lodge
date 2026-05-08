@@ -119,6 +119,77 @@ fn read_cache() -> Option<Vec<RegistryEntry>> {
     Some(registry.extensions)
 }
 
+// ── Official IDs ──────────────────────────────────────────────────────────────
+
+/// Flat list stored in `extensions/official.json` on GitHub.
+#[derive(Debug, Serialize, Deserialize)]
+struct OfficialList {
+    official: Vec<String>,
+}
+
+const OFFICIAL_URL: &str =
+    "https://raw.githubusercontent.com/KronTheDev/lodge/main/extensions/official.json";
+
+fn official_cache_path() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    #[cfg(not(windows))]
+    let base = {
+        let home = std::env::var_os("HOME")?;
+        std::path::PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .into_os_string()
+    };
+    Some(
+        std::path::PathBuf::from(base)
+            .join("lodge")
+            .join("official_cache.json"),
+    )
+}
+
+fn write_official_cache(ids: &std::collections::HashSet<String>) {
+    let Some(path) = official_cache_path() else { return };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let list = OfficialList { official: ids.iter().cloned().collect() };
+    if let Ok(json) = serde_json::to_string_pretty(&list) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+fn read_official_cache() -> Option<std::collections::HashSet<String>> {
+    let path = official_cache_path()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let list: OfficialList = serde_json::from_str(&raw).ok()?;
+    Some(list.official.into_iter().collect())
+}
+
+/// Fetch the set of officially designated extension IDs from GitHub.
+///
+/// Uses a 3-second timeout.  Falls back to the local cache on failure.
+/// If neither is available, returns an empty set (no extensions appear official).
+pub fn fetch_official_ids() -> std::collections::HashSet<String> {
+    match try_fetch_official() {
+        Ok(ids) => {
+            write_official_cache(&ids);
+            ids
+        }
+        Err(_) => read_official_cache().unwrap_or_default(),
+    }
+}
+
+fn try_fetch_official() -> anyhow::Result<std::collections::HashSet<String>> {
+    let response = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()?
+        .get(OFFICIAL_URL)
+        .send()?;
+    let list: OfficialList = response.json()?;
+    Ok(list.official.into_iter().collect())
+}
+
 // ── Fetch ─────────────────────────────────────────────────────────────────────
 
 /// Fetch the extension registry from GitHub and update the local cache.
@@ -261,4 +332,108 @@ pub fn extensions_dir() -> std::path::PathBuf {
         }
     }
     std::path::PathBuf::from("extensions")
+}
+
+// ── Extension enabled/disabled state ─────────────────────────────────────────
+
+/// Persistent record of which extensions the user has explicitly enabled.
+///
+/// Extensions not in this set are available to run but are not managed
+/// (no auto-install).  Enabled extensions are automatically installed when
+/// toggled on if their binary is not already present.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ExtState {
+    /// IDs of explicitly enabled extensions.
+    #[serde(default)]
+    pub enabled: std::collections::HashSet<String>,
+}
+
+fn ext_state_path() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    #[cfg(not(windows))]
+    let base = {
+        let home = std::env::var_os("HOME")?;
+        std::path::PathBuf::from(home).join(".local").join("share").into_os_string()
+    };
+    Some(std::path::PathBuf::from(base).join("lodge").join("ext_state.json"))
+}
+
+/// Load the persisted extension state from disk.  Returns a default (empty)
+/// state if the file is absent or unparseable.
+pub fn load_ext_state() -> ExtState {
+    let Some(path) = ext_state_path() else { return ExtState::default() };
+    let Ok(raw) = std::fs::read_to_string(&path) else { return ExtState::default() };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+/// Persist the extension state to disk.
+pub fn save_ext_state(state: &ExtState) {
+    let Some(path) = ext_state_path() else { return };
+    if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+    if let Ok(json) = serde_json::to_string_pretty(state) { let _ = std::fs::write(path, json); }
+}
+
+/// Returns `true` if the extension binary is present in the extensions directory
+/// or alongside the Lodge binary itself (covers `cargo run` / dev mode where
+/// workspace crates are placed in `target/debug/` next to `lodge.exe`).
+pub fn is_installed(id: &str) -> bool {
+    let bin = if cfg!(windows) { format!("{id}.exe") } else { id.to_string() };
+    let dir = extensions_dir();
+    if dir.join(&bin).exists() || dir.join(id).join(&bin).exists() {
+        return true;
+    }
+    // Dev-mode fallback: sibling of the running lodge executable.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            if exe_dir.join(&bin).exists() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Delete the extension binary (and empty containing sub-directory if any).
+///
+/// Searches the same three locations as `is_installed`:
+/// `extensions/<id>.exe`, `extensions/<id>/<id>.exe`, and `<exe_dir>/<id>.exe`.
+pub fn uninstall_extension(id: &str) -> anyhow::Result<()> {
+    let dir = extensions_dir();
+    let bin = if cfg!(windows) { format!("{id}.exe") } else { id.to_string() };
+
+    // Build candidate list — same logic as is_installed.
+    let mut candidates = vec![dir.join(&bin), dir.join(id).join(&bin)];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join(&bin));
+        }
+    }
+
+    let mut removed = false;
+    for path in &candidates {
+        if path.exists() {
+            std::fs::remove_file(path)?;
+            removed = true;
+        }
+    }
+    // Clean up an empty sub-directory if one was created.
+    let sub = dir.join(id);
+    if sub.is_dir() { let _ = std::fs::remove_dir(&sub); }
+    if !removed { anyhow::bail!("'{id}' is not installed"); }
+    Ok(())
+}
+
+/// Download and extract the extension payload from `entry.payload_url` into
+/// `dest_dir`.  The temporary zip is deleted after extraction.
+pub fn install_extension(
+    entry:    &RegistryEntry,
+    dest_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let (zip_path, _verified) = download_extension(entry, dest_dir)?;
+    let zip_file = std::fs::File::open(&zip_path)?;
+    let mut archive = zip::ZipArchive::new(zip_file)?;
+    archive.extract(dest_dir)?;
+    std::fs::remove_file(&zip_path).ok();
+    Ok(())
 }

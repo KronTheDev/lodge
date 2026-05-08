@@ -15,7 +15,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::Style,
     text::{Line, Span},
-    widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Terminal,
 };
 
@@ -107,37 +107,44 @@ impl SynonymAnim {
 ///
 /// One entry is removed from the bottom every STEP_MS milliseconds so the
 /// sweep is perceptible regardless of how many entries are in history.
+/// Two-phase right-to-left clear animation, driven entirely by elapsed time.
+///
+/// Phase 1 (progress 0.0 → 1.0): every history line's characters are replaced
+/// by ░ blocks simultaneously, sweeping from the rightmost column leftward.
+///
+/// Phase 2 (progress 1.0 → 2.0): the ░ blocks are deleted the same way,
+/// right-to-left, until the area is blank — then `terminal.clear()` fires.
+///
+/// Total wall-clock duration: 2 × PHASE_MS = 2 500 ms.
 struct ClrAnim {
-    snapshot:  Vec<(String, String)>,
-    remaining: usize,
-    last_step: std::time::Instant,
+    /// Original history — passed straight to render_bar; the mask is applied
+    /// there after the lines are built, so wrapping / prefixes are correct.
+    snapshot: Vec<(String, String)>,
+    start:    std::time::Instant,
 }
 
 impl ClrAnim {
-    /// Milliseconds between each entry being wiped off.
-    const STEP_MS: u64 = 80;
+    /// Duration of each phase (░ fill and ░ wipe) in milliseconds.
+    const PHASE_MS: u64 = 750;
 
     fn new(snapshot: Vec<(String, String)>) -> Self {
-        let remaining = snapshot.len();
-        Self { snapshot, remaining, last_step: std::time::Instant::now() }
+        Self { snapshot, start: std::time::Instant::now() }
     }
 
-    /// Called every loop tick. Removes one entry if enough time has elapsed.
-    /// Returns `true` when the animation is complete.
-    fn tick(&mut self) -> bool {
-        if self.remaining == 0 {
-            return true;
-        }
-        if self.last_step.elapsed() >= std::time::Duration::from_millis(Self::STEP_MS) {
-            self.remaining -= 1;
-            self.last_step = std::time::Instant::now();
-        }
-        self.remaining == 0
+    /// Normalised progress: 0.0 = just started · 1.0 = phase 1 done · 2.0 = complete.
+    fn progress(&self) -> f32 {
+        let elapsed = self.start.elapsed().as_millis() as f32;
+        (elapsed / Self::PHASE_MS as f32).min(2.0)
     }
 
-    /// Slice of history still visible this frame.
-    fn visible(&self) -> &[(String, String)] {
-        &self.snapshot[..self.remaining]
+    /// Returns `true` when both phases are done and `terminal.clear()` should fire.
+    fn tick(&self) -> bool {
+        self.progress() >= 2.0
+    }
+
+    /// The original history slice — passed to `render_bar` as `hist_display`.
+    fn snapshot(&self) -> &[(String, String)] {
+        &self.snapshot
     }
 }
 
@@ -506,13 +513,21 @@ pub fn run() -> anyhow::Result<()> {
     std::thread::spawn(|| { let _ = crate::engine::extensions::fetch_registry(); });
 
     // Build extension alias list from cached registry for autocomplete.
-    // Uses whatever is in the local cache right now; updated next session.
-    let (all_ext_entries, _) = crate::engine::extensions::fetch_registry();
+    // Captures online status for the offline indicator in the ext browser.
+    let (all_ext_entries, ext_registry_online) = crate::engine::extensions::fetch_registry();
     let ext_entries: Vec<crate::engine::extensions::RegistryEntry> = all_ext_entries
         .into_iter()
         .filter(|e| e.status != "coming-soon")
         .collect();
-    let ext_ids: Vec<String> = ext_entries.iter().map(|e| e.command_alias().to_string()).collect();
+    // Fetch official extension IDs (falls back to cache when offline).
+    let ext_official_ids = crate::engine::extensions::fetch_official_ids();
+    // Load persisted extension enabled/disabled state.
+    let mut ext_state = crate::engine::extensions::load_ext_state();
+    // Only enabled extensions appear in autocomplete and are dispatchable.
+    let mut ext_ids: Vec<String> = ext_entries.iter()
+        .filter(|e| ext_state.enabled.contains(&e.id))
+        .map(|e| e.command_alias().to_string())
+        .collect();
 
     // Drain any key events that arrived before raw mode was fully active,
     // so they don't accidentally trigger the first screen.
@@ -598,8 +613,16 @@ pub fn run() -> anyhow::Result<()> {
         }
 
         // Advance clear animation.
-        if let Some(ref mut a) = clr_anim {
-            if a.tick() { clr_anim = None; }
+        let clr_just_done = if let Some(ref a) = clr_anim {
+            if a.tick() { clr_anim = None; true } else { false }
+        } else { false };
+        // When the animation finishes, directly clear the terminal screen.
+        // ratatui's per-cell diff on Windows Terminal can miss cells that
+        // were written by a previous overflow-mode Paragraph; terminal.clear()
+        // outputs \x1b[2J unconditionally and resets ratatui's buffer so the
+        // next draw is a guaranteed full redraw.
+        if clr_just_done {
+            terminal.clear()?;
         }
 
         // Tick runspace animations and refresh live probes.
@@ -647,7 +670,7 @@ pub fn run() -> anyhow::Result<()> {
         let term_size = terminal.size().unwrap_or_default();
         let hist_for_hover: &[(String, String)] = clr_anim
             .as_ref()
-            .map(|a| a.visible())
+            .map(|a| a.snapshot())
             .unwrap_or(&history);
         let hover_suggestion = compute_hover_suggestion(
             hover_row, hist_for_hover, history_scroll, split_mode, term_size.height,
@@ -657,8 +680,9 @@ pub fn run() -> anyhow::Result<()> {
         // before the result can replace it.
         let hist_display: &[(String, String)] = clr_anim
             .as_ref()
-            .map(|a| a.visible())
+            .map(|a| a.snapshot())
             .unwrap_or(&history);
+        let clr_progress: Option<f32> = clr_anim.as_ref().map(|a| a.progress());
         terminal.draw(|f| {
             render_bar(
                 &input, cursor, hist_display, history_scroll,
@@ -667,6 +691,7 @@ pub fn run() -> anyhow::Result<()> {
                 hover_suggestion.as_deref(),
                 &runspaces,
                 &ext_ids,
+                clr_progress,
                 f,
             );
             if let Some(page) = help_page {
@@ -692,11 +717,17 @@ pub fn run() -> anyhow::Result<()> {
             }
             if !is_phase {
                 thinking = false;
-                // If this was an Explore result, save it so `expand` can reference it
+                // If this was an Explore result, save it so `expand` can reference it.
                 let was_explore = lodge_brain::intent::resolve_deterministic(&cmd).command
                     == lodge_brain::Command::Explore;
                 if was_explore {
                     last_probe = Some(response);
+                } else if cmd == "!ext" {
+                    // Background install finished — refresh the installed indicators
+                    // now that the binary actually exists on disk.
+                    if let Some(ref mut s) = ext_overlay {
+                        s.refresh_installed();
+                    }
                 }
             }
         }
@@ -779,47 +810,203 @@ pub fn run() -> anyhow::Result<()> {
                 }
 
                 // ── Extension browser overlay key handling ─────────────────
-                if let Some(ref mut state) = ext_overlay {
-                    match key.code {
-                        // List mode navigation
-                        KeyCode::Up if !state.in_detail && state.selected > 0 => {
-                            state.selected -= 1;
+                if ext_overlay.is_some() {
+                    // Phase 1 (immutable): capture action keys — blocked in search mode
+                    // and when no visible selection exists.
+                    let mut ext_action: Option<ext_browser::ExtAction> = None;
+                    if let Some(ref state) = ext_overlay {
+                        if !state.in_detail && !state.search_active {
+                            if let Some(real_idx) = state.selected_real_idx() {
+                                let sel_id        = state.entries[real_idx].id.clone();
+                                let sel_installed = state.installed
+                                    .get(real_idx).copied().unwrap_or(false);
+                                match key.code {
+                                    KeyCode::Char(' ') => {
+                                        ext_action = Some(ext_browser::ExtAction::Toggle(sel_id));
+                                    }
+                                    KeyCode::Char('i') | KeyCode::Char('I') if !sel_installed => {
+                                        ext_action = Some(ext_browser::ExtAction::Install(sel_id));
+                                    }
+                                    KeyCode::Char('u') | KeyCode::Char('U') if sel_installed => {
+                                        ext_action = Some(ext_browser::ExtAction::Uninstall(sel_id));
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
-                        KeyCode::Down
-                            if !state.in_detail
-                                && state.selected + 1 < state.entries.len() =>
-                        {
-                            state.selected += 1;
-                        }
-                        KeyCode::Enter if !state.in_detail => {
-                            state.in_detail = true;
-                            state.sub_page = 0;
-                        }
-                        // Detail sub-page navigation
-                        KeyCode::Left if state.in_detail => {
-                            let total = state.sub_page_count();
-                            state.sub_page = if state.sub_page == 0 {
-                                total - 1
-                            } else {
-                                state.sub_page - 1
-                            };
-                        }
-                        KeyCode::Right | KeyCode::Tab if state.in_detail => {
-                            let total = state.sub_page_count();
-                            state.sub_page = (state.sub_page + 1) % total;
-                        }
-                        // Back from detail to list
-                        KeyCode::Esc | KeyCode::Char('b') | KeyCode::Char('B')
-                            if state.in_detail =>
-                        {
-                            state.in_detail = false;
-                        }
-                        // Close browser entirely
-                        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
-                            ext_overlay = None;
-                        }
-                        _ => {}
                     }
+
+                    // Phase 2 (mutable): navigation, search input, and close.
+                    if ext_action.is_none() {
+                        if let Some(ref mut state) = ext_overlay {
+                            match key.code {
+                                // ── Search input ──────────────────────────────
+                                KeyCode::Char('/') if !state.in_detail && !state.search_active => {
+                                    state.search_active = true;
+                                }
+                                // Printable chars go to search when active
+                                KeyCode::Char(c) if !state.in_detail && state.search_active => {
+                                    state.search.push(c);
+                                    state.selected = 0; // reset cursor on filter change
+                                }
+                                KeyCode::Backspace if !state.in_detail && state.search_active => {
+                                    state.search.pop();
+                                    if state.search.is_empty() {
+                                        state.search_active = false;
+                                    }
+                                }
+                                // Esc clears search if active, otherwise falls through to close
+                                KeyCode::Esc if state.search_active => {
+                                    state.search.clear();
+                                    state.search_active = false;
+                                }
+                                // ── List navigation ───────────────────────────
+                                KeyCode::Up if !state.in_detail && state.selected > 0 => {
+                                    state.selected -= 1;
+                                }
+                                KeyCode::Down
+                                    if !state.in_detail
+                                        && state.selected + 1 < state.visible_count() =>
+                                {
+                                    state.selected += 1;
+                                }
+                                KeyCode::Enter
+                                    if !state.in_detail
+                                        && state.selected_real_idx().is_some() =>
+                                {
+                                    state.in_detail = true;
+                                    state.sub_page  = 0;
+                                }
+                                // ── Detail navigation ─────────────────────────
+                                KeyCode::Left if state.in_detail => {
+                                    let total = state.sub_page_count();
+                                    state.sub_page = if state.sub_page == 0 {
+                                        total - 1
+                                    } else {
+                                        state.sub_page - 1
+                                    };
+                                }
+                                KeyCode::Right | KeyCode::Tab if state.in_detail => {
+                                    let total = state.sub_page_count();
+                                    state.sub_page = (state.sub_page + 1) % total;
+                                }
+                                KeyCode::Esc | KeyCode::Char('b') | KeyCode::Char('B')
+                                    if state.in_detail =>
+                                {
+                                    state.in_detail = false;
+                                }
+                                // ── Close ─────────────────────────────────────
+                                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                                    ext_overlay = None;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    // Execute the action (no borrow of ext_overlay held at this point).
+                    if let Some(action) = ext_action {
+                        match action {
+                            ext_browser::ExtAction::Toggle(ref id) => {
+                                if ext_state.enabled.contains(id) {
+                                    ext_state.enabled.remove(id);
+                                } else {
+                                    ext_state.enabled.insert(id.clone());
+                                }
+                                crate::engine::extensions::save_ext_state(&ext_state);
+                                // Rebuild autocomplete list to reflect new enabled state.
+                                ext_ids = ext_entries.iter()
+                                    .filter(|e| ext_state.enabled.contains(&e.id))
+                                    .map(|e| e.command_alias().to_string())
+                                    .collect();
+                                // Sync state back into the overlay
+                                if let Some(ref mut s) = ext_overlay {
+                                    s.enabled = ext_state.enabled.clone();
+                                    s.refresh_installed();
+                                }
+                                // Auto-install when just enabled and binary absent
+                                if ext_state.enabled.contains(id)
+                                    && !crate::engine::extensions::is_installed(id)
+                                {
+                                    if let Some(entry) =
+                                        ext_entries.iter().find(|e| &e.id == id).cloned()
+                                    {
+                                        let id2  = id.clone();
+                                        let tx2  = tx.clone();
+                                        history.push((
+                                            "!ext".into(),
+                                            format!("installing {}…", id),
+                                        ));
+                                        thinking = true;
+                                        std::thread::spawn(move || {
+                                            let dir = crate::engine::extensions::extensions_dir();
+                                            let res = crate::engine::extensions::install_extension(
+                                                &entry, &dir,
+                                            );
+                                            let msg = match res {
+                                                Ok(()) => format!("{id2} installed."),
+                                                Err(e)  => format!("couldn't install {id2} — {e}"),
+                                            };
+                                            let _ = tx2.send(("!ext".into(), msg));
+                                        });
+                                    }
+                                }
+                            }
+                            ext_browser::ExtAction::Install(ref id) => {
+                                if let Some(entry) =
+                                    ext_entries.iter().find(|e| &e.id == id).cloned()
+                                {
+                                    let id2 = id.clone();
+                                    let tx2 = tx.clone();
+                                    history.push(("!ext".into(), format!("installing {}…", id)));
+                                    thinking = true;
+                                    std::thread::spawn(move || {
+                                        let dir = crate::engine::extensions::extensions_dir();
+                                        let res = crate::engine::extensions::install_extension(
+                                            &entry, &dir,
+                                        );
+                                        let msg = match res {
+                                            Ok(()) => format!("{id2} installed."),
+                                            Err(e)  => format!("couldn't install {id2} — {e}"),
+                                        };
+                                        let _ = tx2.send(("!ext".into(), msg));
+                                    });
+                                    // refresh_installed() will fire in try_recv when the
+                                    // background thread sends its completion message.
+                                } else {
+                                    history.push((
+                                        "!ext".into(),
+                                        format!("no download URL for {}.", id),
+                                    ));
+                                }
+                            }
+                            ext_browser::ExtAction::Uninstall(ref id) => {
+                                match crate::engine::extensions::uninstall_extension(id) {
+                                    Ok(()) => {
+                                        ext_state.enabled.remove(id);
+                                        crate::engine::extensions::save_ext_state(&ext_state);
+                                        // Rebuild autocomplete list.
+                                        ext_ids = ext_entries.iter()
+                                            .filter(|e| ext_state.enabled.contains(&e.id))
+                                            .map(|e| e.command_alias().to_string())
+                                            .collect();
+                                        if let Some(ref mut s) = ext_overlay {
+                                            s.enabled = ext_state.enabled.clone();
+                                            s.refresh_installed();
+                                        }
+                                        history.push(("!ext".into(), format!("{} removed.", id)));
+                                    }
+                                    Err(e) => {
+                                        history.push((
+                                            "!ext".into(),
+                                            format!("couldn't remove {} — {e}", id),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     continue;
                 }
 
@@ -981,6 +1168,11 @@ pub fn run() -> anyhow::Result<()> {
 
                             // ── Clr: clear chat history (wipe-up animation) ──────────────
                             if trimmed == "clr" {
+                                // Wipe the terminal immediately so ratatui's
+                                // buffer is fully reset before the first
+                                // animation frame — prevents any pre-existing
+                                // on-screen content from surviving as ghost text.
+                                terminal.clear()?;
                                 clr_anim = Some(ClrAnim::new(std::mem::take(&mut history)));
                                 history_scroll = 0;
                                 continue;
@@ -1134,6 +1326,20 @@ pub fn run() -> anyhow::Result<()> {
                             };
 
                             if let Some(ref ext_entry) = ext_match {
+                                // Respect the enabled/disabled toggle from !ext.
+                                if !ext_state.enabled.contains(&ext_entry.id) {
+                                    history.push((
+                                        trimmed,
+                                        format!(
+                                            "{} is disabled — open !ext to enable it.",
+                                            ext_entry.name
+                                        ),
+                                    ));
+                                    input.clear();
+                                    cursor = 0;
+                                    continue;
+                                }
+
                                 let alias = ext_entry.command_alias().to_string();
                                 // User-supplied path after the alias (e.g. `!clean ~/Downloads`).
                                 let user_path = trimmed.trim_start_matches(&*alias).trim().to_string();
@@ -1178,6 +1384,9 @@ pub fn run() -> anyhow::Result<()> {
                                 } else {
                                     ext_overlay = Some(ext_browser::ExtBrowserState::new(
                                         ext_entries.clone(),
+                                        ext_state.enabled.clone(),
+                                        ext_registry_online,
+                                        ext_official_ids.clone(),
                                     ));
                                 }
                                 continue;
@@ -1220,6 +1429,7 @@ pub fn run() -> anyhow::Result<()> {
                                                 hs_anim.as_deref(),
                                                 &runspaces,
                                                 &ext_ids,
+                                                None,
                                                 f,
                                             );
                                         })?;
@@ -1248,6 +1458,7 @@ pub fn run() -> anyhow::Result<()> {
                                                     hs_scoop.as_deref(),
                                                     &runspaces,
                                                     &ext_ids,
+                                                    None,
                                                     f,
                                                 );
                                             })?;
@@ -1786,6 +1997,72 @@ fn format_installed() -> String {
     lines.join("\n")
 }
 
+/// Apply the right-to-left clear animation to an already-built `Vec<Line>`.
+///
+/// `progress` 0.0–1.0 → Phase 1: sweep ░ in from the right, replacing original text.
+/// `progress` 1.0–2.0 → Phase 2: sweep spaces in from the right, erasing the ░.
+/// `area_width` is the display-column width of the history pane.
+fn apply_clr_mask(
+    lines:      Vec<Line<'_>>,
+    progress:   f32,
+    area_width: usize,
+) -> Vec<Line<'static>> {
+    let phase2      = progress >= 1.0;
+    let frac        = if phase2 { progress - 1.0 } else { progress }.clamp(0.0, 1.0);
+    // boundary_col: chars at col >= boundary_col are already transformed.
+    // Starts at area_width (nothing changed) and sweeps to 0 (everything changed).
+    let boundary_col = ((1.0 - frac) * area_width as f32).round() as usize;
+    let noise_style  = Style::default().fg(palette::TEXT_DIM);
+
+    lines
+        .into_iter()
+        .map(|line| {
+            let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+
+            if phase2 {
+                // Phase 2: ░ blocks remain left of boundary, spaces clear the right.
+                let noise   = boundary_col.min(total);
+                let cleared = total.saturating_sub(boundary_col);
+                let mut spans: Vec<Span<'static>> = Vec::with_capacity(2);
+                if noise > 0 {
+                    spans.push(Span::styled("░".repeat(noise), noise_style));
+                }
+                if cleared > 0 {
+                    // Explicit spaces so ratatui's diff overwrites old ░ cells.
+                    spans.push(Span::styled(" ".repeat(cleared), Style::default()));
+                }
+                Line::from(spans)
+            } else {
+                // Phase 1: keep original styled spans left of boundary; ░ right of it.
+                let mut col       = 0usize;
+                let mut new_spans: Vec<Span<'static>> = Vec::new();
+
+                for span in line.spans {
+                    let style = span.style;
+                    let mut before      = String::new();
+                    let mut noise_count = 0usize;
+
+                    for c in span.content.chars() {
+                        if col < boundary_col {
+                            before.push(c);
+                        } else {
+                            noise_count += 1;
+                        }
+                        col += 1;
+                    }
+                    if !before.is_empty() {
+                        new_spans.push(Span::styled(before, style));
+                    }
+                    if noise_count > 0 {
+                        new_spans.push(Span::styled("░".repeat(noise_count), noise_style));
+                    }
+                }
+                Line::from(new_spans)
+            }
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_bar(
     input:            &str,
@@ -1801,6 +2078,7 @@ fn render_bar(
     hover_suggestion: Option<&str>,
     runspaces:        &[Runspace],
     ext_ids:          &[String],
+    clr_progress:     Option<f32>,
     frame:            &mut ratatui::Frame,
 ) {
     let area = frame.area();
@@ -1940,50 +2218,85 @@ fn render_bar(
         })
         .collect();
 
-    // Always fill chunks[2] with the background first. Without this, cells
-    // above hist_area are never written to and ratatui's diff leaves stale
-    // content on screen whenever history shrinks (ghost text).
-    frame.render_widget(
-        Paragraph::new("").style(Style::default().bg(palette::BG)),
-        chunks[2],
-    );
+    if let Some(p) = clr_progress {
+        // ── Animation path ────────────────────────────────────────────────────
+        // Render a single Paragraph that covers every cell in chunks[2].
+        // Padding rows at the top + per-line right-padding ensure no cell is
+        // left unwritten — eliminating ghost characters without relying on
+        // ratatui's diff to catch unwritten cells.
+        let area_w = chunks[2].width as usize;
+        let avail  = available_height as usize;
+        let masked = apply_clr_mask(history_lines, p, area_w);
 
-    if history_height > 0 {
-        if history_height <= available_height {
-            // History fits — bottom-align it.
-            let hist_area = ratatui::layout::Rect {
-                x:      chunks[2].x,
-                y:      chunks[2].bottom() - history_height,
-                width:  chunks[2].width,
-                height: history_height,
-            };
-            frame.render_widget(Paragraph::new(history_lines), hist_area);
-        } else {
-            // History overflows — apply user scroll offset (0 = bottom).
-            let base   = history_height - available_height;
-            let offset = base.saturating_sub(history_scroll);
-            let para_area = ratatui::layout::Rect {
-                width: chunks[2].width.saturating_sub(1),
-                ..chunks[2]
-            };
-            frame.render_widget(
-                Paragraph::new(history_lines).scroll((offset, 0)),
-                para_area,
-            );
-            // Scrollbar: content_length = total lines, viewport = visible lines,
-            // position = top line currently shown (0 = content top, base = content bottom).
-            let mut sb_state = ScrollbarState::new(history_height as usize)
-                .viewport_content_length(available_height as usize)
-                .position(offset as usize);
-            frame.render_stateful_widget(
-                Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                    .begin_symbol(None)
-                    .end_symbol(None)
-                    .thumb_style(Style::default().fg(palette::TEXT_DIM))
-                    .track_style(Style::default().fg(palette::SURFACE)),
-                chunks[2],
-                &mut sb_state,
-            );
+        // Overflow: take only the bottom `avail` lines.
+        let skip    = masked.len().saturating_sub(avail);
+        let visible: Vec<Line<'static>> = masked.into_iter().skip(skip).collect();
+
+        // Top-padding: explicit full-width space rows to overwrite old content.
+        let pad    = avail.saturating_sub(visible.len());
+        let bg_row = || Line::from(Span::raw(" ".repeat(area_w)));
+        let mut all_lines: Vec<Line<'static>> = (0..pad).map(|_| bg_row()).collect();
+
+        for line in visible {
+            // Right-pad each content line so every cell in the row is written.
+            let line_w: usize = line.spans.iter()
+                .map(|s| s.content.chars().count())
+                .sum();
+            let mut line = line;
+            if line_w < area_w {
+                line.spans.push(Span::raw(" ".repeat(area_w - line_w)));
+            }
+            all_lines.push(line);
+        }
+
+        frame.render_widget(Paragraph::new(all_lines), chunks[2]);
+    } else {
+        // ── Normal path ───────────────────────────────────────────────────────
+        // Clear chunks[2] every frame so cells above hist_area are erased when
+        // history shrinks.
+        frame.render_widget(Clear, chunks[2]);
+        frame.render_widget(
+            Block::default().style(Style::default().bg(palette::BG)),
+            chunks[2],
+        );
+
+        if history_height > 0 {
+            if history_height <= available_height {
+                // History fits — bottom-align it.
+                let hist_area = ratatui::layout::Rect {
+                    x:      chunks[2].x,
+                    y:      chunks[2].bottom() - history_height,
+                    width:  chunks[2].width,
+                    height: history_height,
+                };
+                frame.render_widget(Paragraph::new(history_lines), hist_area);
+            } else {
+                // History overflows — apply user scroll offset (0 = bottom).
+                let base   = history_height - available_height;
+                let offset = base.saturating_sub(history_scroll);
+                let para_area = ratatui::layout::Rect {
+                    width: chunks[2].width.saturating_sub(1),
+                    ..chunks[2]
+                };
+                frame.render_widget(
+                    Paragraph::new(history_lines).scroll((offset, 0)),
+                    para_area,
+                );
+                // Scrollbar: content_length = total lines, viewport = visible lines,
+                // position = top line currently shown (0 = content top, base = content bottom).
+                let mut sb_state = ScrollbarState::new(history_height as usize)
+                    .viewport_content_length(available_height as usize)
+                    .position(offset as usize);
+                frame.render_stateful_widget(
+                    Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                        .begin_symbol(None)
+                        .end_symbol(None)
+                        .thumb_style(Style::default().fg(palette::TEXT_DIM))
+                        .track_style(Style::default().fg(palette::SURFACE)),
+                    chunks[2],
+                    &mut sb_state,
+                );
+            }
         }
     }
 
@@ -2609,11 +2922,17 @@ fn launch_extension(
     let ext_dir = crate::engine::extensions::extensions_dir();
 
     // Locate the binary.
+    // Candidate 1/2: extensions/ sub-dir (production layout).
+    // Candidate 3: alongside lodge.exe itself (dev/cargo-run layout where
+    //   `cargo build` places both binaries in target/debug/).
     let bin_name = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
-    let candidates = [
+    let exe_sibling = std::env::current_exe().ok()
+        .and_then(|p| p.parent().map(|d| d.join(&bin_name)));
+    let mut candidates: Vec<std::path::PathBuf> = vec![
         ext_dir.join(&bin_name),
         ext_dir.join(name).join(&bin_name),
     ];
+    if let Some(s) = exe_sibling { candidates.push(s); }
 
     let bin_path = candidates.iter().find(|p| p.exists()).cloned()
         .or_else(|| try_download_extension(name, &ext_dir).ok())
