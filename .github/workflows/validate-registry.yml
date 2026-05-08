@@ -1,0 +1,26 @@
+name: Validate Extension Registry
+
+on:
+  pull_request:
+    paths:
+      - extensions/registry.json
+  push:
+    paths:
+      - extensions/registry.json
+      - scripts/validate_registry.py
+
+jobs:
+  validate:
+    name: Registry integrity check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate registry
+        run: python scripts/validate_registry.py
