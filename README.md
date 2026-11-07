@@ -145,4 +145,4 @@ Warning       #c49a3a   lantern amber
 
 ## License
 
-© 2026 KronTheDev. All rights reserved.
+Licensed under the [Apache License 2.0](LICENSE). © 2026 KronTheDev.
